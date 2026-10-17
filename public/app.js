@@ -845,12 +845,20 @@ let stepTick = 0;
 const MOVE_RESUME_MS = 520;
 const MOVE_HOLD_MAX_MS = 1600;
 
+// 「还要不要走」不能只看 viewPos 是否等于最终 pos：起点 → 卡格 → 抽到回起点这类往返，
+// 首尾是同一格但中间整段过程都要演出来，所以队列里还剩分段就算没走完。
 function pendingMove() {
   const S = store.state;
-  return S.players.some((p) => !p.bankrupt && store.viewPos.has(p.id) && store.viewPos.get(p.id) !== p.pos);
+  return S.players.some((p) => {
+    if (p.bankrupt) return false;
+    const q = store.moveQ.get(p.id);
+    if (q && q.length) return true; // 还有分段没走完（首尾可能同格）
+    const cur = store.viewPos.get(p.id);
+    return cur !== undefined && cur !== p.pos;
+  });
 }
 
-// 服务端给了这一趟的位移轨迹就照着走：先走到卡格，再后退 / 再前往某地 / 直接飞进监狱。
+// 服务端给了这一趟的位移轨迹就照着走：先走到卡格，再后退 / 再前往某地 / 顺时针进监狱。
 // 没有轨迹（老版本、重连）才退化成"就近走"。
 function adoptPaths(S) {
   if (store.moveSeq === S.moveSeq) return;
@@ -859,10 +867,13 @@ function adoptPaths(S) {
     const path = p.path || [];
     if (!path.length) return;
     const q = store.moveQ.get(p.id);
-    if (q && q.length) return;                       // 上一段还没走完，别打断
+    if (q && q.length) return;                // 上一段还没走完，别打断
     const cur = store.viewPos.get(p.id);
-    if (cur === undefined || cur === p.pos) return;  // 不用动
-    if (cur !== path[0].from) return;                // 对不上（掉线重连等）就按老办法走
+    if (cur === undefined) return;
+    if (cur !== path[0].from) return;         // 对不上（掉线重连等）就按老办法走
+    // 这里不能用「cur === p.pos」跳过：往返一圈又回到出发格时首尾相同，
+    // 中间的来回路程仍然要一格格走出来
+    if (!path.some((s) => s.from !== s.to)) return;
     store.moveQ.set(p.id, path.slice());
   });
 }
@@ -875,9 +886,16 @@ function stepTokens() {
   let stepMs = TOKEN_STEP_MS;
   S.players.forEach((p) => {
     const cur = store.viewPos.get(p.id);
-    if (cur === undefined || cur === p.pos) return;
+    if (cur === undefined) return;
     const q = store.moveQ.get(p.id);
-    const seg = q && q.length ? q[0] : null;
+    let seg = q && q.length ? q[0] : null;
+    // 已经站在段终点却还留在队列里（异常兜底）：直接出队，别卡住
+    while (seg && cur === seg.to) {
+      q.shift();
+      seg = q.length ? q[0] : null;
+    }
+    // 没有分段可走、且已经站在最终格上，才算走完
+    if (!seg && cur === p.pos) return;
 
     let dir;
     if (seg) dir = seg.mode === 'back' ? -1 : 1;
