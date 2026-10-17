@@ -1,4 +1,6 @@
 // 罗弗敦大富翁 —— 前端
+import { initAudio, sfx, audioState, setMusicVol, setSfxVol, toggleMuted, onAudioChange } from './audio.js';
+
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
@@ -15,6 +17,16 @@ const store = {
   cellEls: [],
   tokenEls: new Map(),
   viewPos: new Map(),
+  moveQ: new Map(),      // 棋子待走的分段轨迹：pid -> [{from, to, mode}]
+  moveSeq: -1,           // 已消费过的轨迹编号
+  moveHold: false,       // 多段位移之间按住棋子，先把播报放出来
+  moveHoldTimer: null,   // 兜底：一直没有播报也要继续走
+  moveResumeTimer: null, // 播报出现后的倒计时
+  moveHoldPid: null,     // 被按住的是哪个棋子（预备动画要落在它身上）
+  moveHint: null,        // 下一段的去向提示，插进下一条播报卡片里
+  cashPrev: new Map(),   // 上一次的现金，用来算卡片上的浮动金额
+  cashFxQueue: [],       // 待播的金额变化，等对应播报上屏才飘
+  cashFxTimer: null,     // 兜底：等太久也放出来
   moveTimer: null,
   diceBusyUntil: 0,
   lastTurnKey: '',
@@ -57,11 +69,32 @@ async function api(path, body) {
   return json;
 }
 
+// 每个操作对应一个音效；建房升到酒店时用更隆重的那一声
+const ACTION_SOUND = {
+  roll: 'roll', jailRoll: 'roll', rollOrder: 'roll',
+  buy: 'buy', pass: 'back',
+  sellHouse: 'sell', mortgage: 'sell', unmortgage: 'coin',
+  jailPay: 'pay', jailCard: 'free',
+  offerTrade: 'trade', respondTrade: 'trade',
+  start: 'start', endTurn: 'click',
+  addBot: 'click', removeBot: 'back', setLimit: 'click',
+};
+
+function actionSound(action) {
+  if (action.type === 'build') {
+    const st = store.state?.cells?.[action.index];
+    return st && st.houses === 4 ? 'hotel' : 'build';
+  }
+  return ACTION_SOUND[action.type] || 'click';
+}
+
 async function act(action) {
   if (!store.room) return;
+  sfx(actionSound(action));
   try {
     await api('/api/action', { roomId: store.room, token: store.token, action });
   } catch (e) {
+    sfx('error');
     toast(e.message);
   }
 }
@@ -75,6 +108,7 @@ async function boot() {
   store.decks = data.decks;
   buildBoard();
   bindUI();
+  initAudio(); // 音频要等第一次用户手势才能出声，这里只做绑定
 
   const params = new URLSearchParams(location.search);
   const roomId = (params.get('r') || '').toUpperCase();
@@ -154,7 +188,64 @@ function bindUI() {
   $('#btn-theme').addEventListener('click', () => {
     applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
   });
+  bindAudioUI();
   applyTheme(currentTheme()); // 同步图标与浏览器主题色
+}
+
+// ────────────── 声音设置面板 ──────────────
+function bindAudioUI() {
+  const btn = $('#btn-audio');
+  const pop = $('#audio-pop');
+  if (!btn || !pop) return;
+  const icon = $('#audio-icon');
+  const mRange = $('#vol-music');
+  const sRange = $('#vol-sfx');
+  const muteBtn = $('#btn-mute');
+
+  const sync = () => {
+    const s = audioState();
+    icon.textContent = s.muted ? '🔇' : '🔊';
+    btn.title = s.muted ? '已静音 · 点开调音量' : '声音设置';
+    if (mRange) mRange.value = String(Math.round(s.music * 100));
+    if (sRange) sRange.value = String(Math.round(s.sfx * 100));
+    if (muteBtn) {
+      muteBtn.textContent = s.muted ? '取消静音' : '全部静音';
+      muteBtn.classList.toggle('on', s.muted);
+    }
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    pop.classList.toggle('hidden');
+    if (!pop.classList.contains('hidden')) sync();
+  });
+  document.addEventListener('click', (e) => {
+    if (pop.classList.contains('hidden')) return;
+    if (!pop.contains(e.target) && !btn.contains(e.target)) pop.classList.add('hidden');
+  });
+  mRange?.addEventListener('input', () => setMusicVol(Number(mRange.value) / 100));
+  sRange?.addEventListener('input', () => setSfxVol(Number(sRange.value) / 100));
+  sRange?.addEventListener('change', () => sfx('coin')); // 松手时试听一下当前音量
+  muteBtn?.addEventListener('click', () => { toggleMuted(); sync(); });
+
+  // 点任何按钮都给一声轻响，操作有回应；面板里和动作按钮交给各自的音效
+  document.addEventListener('click', (e) => {
+    const el = e.target;
+    if (!el || typeof el.closest !== 'function') return;
+    if (el.closest('[data-action], #audio-pop')) return;
+    if (el.closest('button, .btn, .icon-btn, .theme-btn, .cell, .pcard')) sfx('click');
+  }, true);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'm' && e.key !== 'M') return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    toggleMuted();
+    sync();
+  });
+
+  onAudioChange(sync);
+  sync();
 }
 
 // ────────────── 主题 ──────────────
@@ -423,6 +514,7 @@ function renderGame() {
   store.lastTurnNo = S.turnNo;
   $('#room-code').textContent = S.id;
   renderPlayers();
+  renderCashFx(S);
   renderBoardState();
   renderActions();
   renderCenter();
@@ -468,6 +560,7 @@ async function sendChat(e) {
   const text = input.value.trim();
   if (!text || !store.room) return;
   input.value = '';
+  sfx('chat');
   try {
     await api('/api/action', {
       roomId: store.room,
@@ -521,6 +614,59 @@ function renderPlayers() {
         </div>
       </div>`;
   }).join('');
+}
+
+// 现金变了不要马上飘：state 一到位就飘会出现"骰子刚扔、棋子还没走，钱先变了"。
+// 先把变化排进队列，等讲这件事的那条播报上屏（showBanner）时才飘出来。
+const CASH_FX_MAX_WAIT_MS = 2600; // 兜底：一直没等到播报也不能让这笔钱悄无声息
+
+function renderCashFx(S) {
+  S.players.forEach((p) => {
+    const prev = store.cashPrev.get(p.id);
+    store.cashPrev.set(p.id, p.cash);
+    if (prev == null || prev === p.cash) return;
+    store.cashFxQueue.push({ pid: p.id, delta: p.cash - prev });
+  });
+  if (store.cashFxQueue.length) {
+    clearTimeout(store.cashFxTimer);
+    store.cashFxTimer = setTimeout(flushCashFx, CASH_FX_MAX_WAIT_MS);
+  }
+}
+
+// 有播报上屏了 → 把排着的金额变化一起放出来，和字幕同步
+function flushCashFx() {
+  clearTimeout(store.cashFxTimer);
+  store.cashFxTimer = null;
+  if (!store.cashFxQueue.length) return;
+  const batch = store.cashFxQueue;
+  store.cashFxQueue = [];
+  batch.forEach(({ pid, delta }) => popCash(pid, delta));
+}
+
+// 单个玩家卡右侧飘一个 +kr / −kr，所有玩家都算（不只是当前出手的人）
+function popCash(pid, delta) {
+  const list = $('#players');
+  if (!list) return;
+  const card = list.querySelector(`.pcard[data-pid="${pid}"]`);
+  if (!card) return;
+  const gain = delta > 0;
+
+  // 同一张卡上只留最新一个，避免连续变动时几个数字叠在一起
+  card.querySelectorAll('.cash-pop').forEach((n) => n.remove());
+  const pop = document.createElement('div');
+  pop.className = `cash-pop ${gain ? 'gain' : 'loss'}`;
+  pop.textContent = `${gain ? '+' : '−'} kr ${fmt(Math.abs(delta))}`;
+  card.appendChild(pop);
+  setTimeout(() => pop.remove(), 1700);
+
+  // 卡片上的金额本身也跟着闪一下
+  const cashEl = card.querySelector('.pcash');
+  if (cashEl) {
+    cashEl.classList.remove('flash-gain', 'flash-loss');
+    void cashEl.offsetWidth;
+    cashEl.classList.add(gain ? 'flash-gain' : 'flash-loss');
+    setTimeout(() => cashEl.classList.remove('flash-gain', 'flash-loss'), 950);
+  }
 }
 
 // ────────────── 棋盘 ──────────────
@@ -679,18 +825,46 @@ function renderTokens() {
     if (p.bankrupt) store.viewPos.set(p.id, p.pos);
   });
 
+  adoptPaths(S); // 服务端这一趟的位移轨迹，先接过来排好队
   paintTokens();
 
-  if (pendingMove() && !store.moveTimer && !store.bannerBusy) {
+  // 段间停住时（等播报）不要顺手把下一步排上，交给 resumeMove()
+  if (pendingMove() && !store.moveTimer && !store.bannerBusy && !store.moveHold) {
     // 播报正在放就先等等，等它收完再走子，两件事不叠在一起
     const wait = Math.max(0, store.diceBusyUntil - Date.now());
     store.moveTimer = setTimeout(stepTokens, wait);
   }
 }
 
+let stepTick = 0;
+
+// 多段位移：走完一段先停住，等这段触发的播报出现，再过 MOVE_RESUME_MS 才走下一段。
+// 兜底 MOVE_HOLD_MAX_MS：万一这一趟没有播报，也不能把棋子一直按在原地。
+// 光靠"停一下"看不出来，所以停顿期间还会点亮棋子 + 闪目标格 + 播报里带一行去向，
+// 让"播报说要动 → 棋子动"这条因果链被看见，而不仅仅是等了一段时间。
+const MOVE_RESUME_MS = 520;
+const MOVE_HOLD_MAX_MS = 1600;
+
 function pendingMove() {
   const S = store.state;
   return S.players.some((p) => !p.bankrupt && store.viewPos.has(p.id) && store.viewPos.get(p.id) !== p.pos);
+}
+
+// 服务端给了这一趟的位移轨迹就照着走：先走到卡格，再后退 / 再前往某地 / 直接飞进监狱。
+// 没有轨迹（老版本、重连）才退化成"就近走"。
+function adoptPaths(S) {
+  if (store.moveSeq === S.moveSeq) return;
+  store.moveSeq = S.moveSeq;
+  S.players.forEach((p) => {
+    const path = p.path || [];
+    if (!path.length) return;
+    const q = store.moveQ.get(p.id);
+    if (q && q.length) return;                       // 上一段还没走完，别打断
+    const cur = store.viewPos.get(p.id);
+    if (cur === undefined || cur === p.pos) return;  // 不用动
+    if (cur !== path[0].from) return;                // 对不上（掉线重连等）就按老办法走
+    store.moveQ.set(p.id, path.slice());
+  });
 }
 
 function stepTokens() {
@@ -698,19 +872,41 @@ function stepTokens() {
   const S = store.state;
   if (!S) return;
   let moved = false;
+  let stepMs = TOKEN_STEP_MS;
   S.players.forEach((p) => {
     const cur = store.viewPos.get(p.id);
     if (cur === undefined || cur === p.pos) return;
-    const fwd = (p.pos - cur + 40) % 40;
-    const back = (cur - p.pos + 40) % 40;
-    // 后退类卡牌（≤6 格）往回走，其余一律顺时针前进
-    const dir = back > 0 && back < fwd && back <= 6 ? -1 : 1;
+    const q = store.moveQ.get(p.id);
+    const seg = q && q.length ? q[0] : null;
+
+    let dir;
+    if (seg) dir = seg.mode === 'back' ? -1 : 1;
+    else {
+      const fwd = (p.pos - cur + 40) % 40;
+      const back = (cur - p.pos + 40) % 40;
+      // 没有轨迹时兜底：后退类卡牌（≤6 格）往回走，其余一律顺时针前进
+      dir = back > 0 && back < fwd && back <= 6 ? -1 : 1;
+    }
     store.viewPos.set(p.id, (cur + dir + 40) % 40);
     moved = true;
+    // 「前往某块地」「回到起点」可能要走二三十格，段内剩余多就走快些，别让人干等
+    if (seg) {
+      const left = dir < 0 ? (cur - seg.to + 40) % 40 : (seg.to - cur + 40) % 40;
+      stepMs = Math.min(stepMs, left > 18 ? 54 : left > 9 ? 72 : TOKEN_STEP_MS);
+    }
+    // 这一段走完了：后面还有一段就先停住，把播报放出来，等播报出来了再接着走
+    if (seg && store.viewPos.get(p.id) === seg.to) {
+      q.shift();
+      if (q.length) holdMove(p.id);
+    }
   });
   if (moved) {
     paintTokens();
-    store.moveTimer = setTimeout(stepTokens, TOKEN_STEP_MS);
+    stepTick = (stepTick + 1) % 8;
+    // 走得太密时脚步声隔一下再响，免得连成一串噪音
+    if (stepMs >= TOKEN_STEP_MS || stepTick % 2 === 0) sfx('step', { k: stepTick });
+    // 停在段间等播报时不要再排下一步，由 resumeMove() 接着放
+    if (!store.moveHold) store.moveTimer = setTimeout(stepTokens, stepMs);
   } else {
     // 走完了，留一点过渡时间再放播报，避免"人还没站稳就开始播下一条"
     store.moveSettleAt = Date.now() + 220;
@@ -720,13 +916,92 @@ function stepTokens() {
   }
 }
 
+// 走完一段先按住棋子：点亮它和目标格，再把压住的播报放出来
+function holdMove(pid) {
+  store.moveHold = true;
+  clearTimeout(store.moveTimer);
+  store.moveTimer = null;
+  clearTimeout(store.moveHoldTimer);
+  store.moveHoldTimer = setTimeout(resumeMove, MOVE_HOLD_MAX_MS); // 兜底
+  primeMove(pid);        // 棋子蓄力 + 目标格闪烁 + 准备去向提示
+  clearTimeout(store.bannerWaitTimer);
+  store.bannerWaitTimer = setTimeout(pumpBanner, 40);
+  renderActions();
+}
+
+// 停顿期间的"预告"：棋子亮起来 + 目标格闪起来 + 一记蓄力音，
+// 让观众知道接下来是这颗棋子要动、要去哪一格，而不是干等一段时间
+function primeMove(pid) {
+  clearPrime();
+  const q = store.moveQ.get(pid);
+  const seg = q && q.length ? q[0] : null;
+  if (!seg) return;
+  store.moveHoldPid = pid;
+
+  const tok = store.tokenEls.get(pid);
+  if (tok) tok.classList.add('primed');
+
+  const cell = store.cellEls[seg.to]?.el;
+  if (cell) {
+    cell.classList.add('target');
+    cell.classList.toggle('target-back', seg.mode === 'back');
+  }
+  sfx('prime');
+
+  // 播报里带一行去向，把"接下来会发生什么"直接写出来
+  const from = store.viewPos.get(pid) ?? 0;
+  const n = seg.mode === 'back' ? (from - seg.to + 40) % 40 : (seg.to - from + 40) % 40;
+  const name = store.board[seg.to]?.name || '';
+  const verb = seg.mode === 'back' ? '后退' : '前往';
+  store.moveHint =
+    `<div class="tb-move-hint${seg.mode === 'back' ? ' back' : ''}">`
+    + `<span class="mh-arrow">${seg.mode === 'back' ? '↩' : '↦'}</span>`
+    + `${verb} ${n} 格 → ${esc(name)}</div>`;
+}
+
+// 收掉预告：棋子开始走了，就不需要再指着它
+function clearPrime() {
+  const pid = store.moveHoldPid;
+  if (pid) {
+    const tok = store.tokenEls.get(pid);
+    if (tok) tok.classList.remove('primed');
+  }
+  $$('.cell.target').forEach((c) => c.classList.remove('target', 'target-back'));
+  store.moveHoldPid = null;
+  store.moveHint = null;
+}
+
+// 播报出来之后再等 MOVE_RESUME_MS 才走下一段（后退 / 前往某地 / 进监狱……）
+function armMoveResume() {
+  if (!store.moveHold || store.moveResumeTimer) return;
+  store.moveResumeTimer = setTimeout(resumeMove, MOVE_RESUME_MS);
+}
+
+function resumeMove() {
+  if (!store.moveHold) return;
+  clearTimeout(store.moveResumeTimer);
+  clearTimeout(store.moveHoldTimer);
+  store.moveResumeTimer = null;
+  store.moveHoldTimer = null;
+  store.moveHold = false;
+  clearPrime();   // 出发了，收掉棋子和目标格上的预告
+  stepTokens();
+}
+
 // 立即就位：重开一局、重连等场景不做补间
 function snapTokens() {
   const S = store.state;
   if (!S) return;
   clearTimeout(store.moveTimer);
+  clearTimeout(store.moveHoldTimer);
+  clearTimeout(store.moveResumeTimer);
   store.moveTimer = null;
+  store.moveHoldTimer = null;
+  store.moveResumeTimer = null;
+  store.moveHold = false;
+  clearPrime();
   store.moveSettleAt = 0;
+  store.moveQ.clear();
   S.players.forEach((p) => store.viewPos.set(p.id, p.pos));
   paintTokens();
 }
@@ -814,6 +1089,9 @@ function renderCenter() {
         d.classList.add('rolling');
         setTimeout(() => d.classList.remove('rolling'), 550);
       });
+      // 骰子落定的闷响；掷出对子再叠一串风铃
+      setTimeout(() => sfx('diceLand'), 540);
+      if (d1 === d2) setTimeout(() => sfx('double'), 660);
     }
     store.lastDice = diceKey;
   }
@@ -907,7 +1185,29 @@ function detectTurnBanner(S) {
       <div class="tb-name">${esc(p.name)}</div>
       <div class="tb-time">${clock} · 开始行动</div>
       <div class="tb-sub">${p.id === store.me ? '轮到你出手' : '轮到 TA 出手'}</div>`,
+    sound: 'turn',
   });
+}
+
+// 日志条目 → 音效：声画同步，播报出现的同时响
+function soundForLog(l) {
+  const t = l.text || '';
+  switch (l.kind) {
+    case 'money':
+      if (t.includes('起点津贴') || t.includes('过路津贴')) return 'salary';
+      return (l.delta || 0) >= 0 ? 'coin' : 'pay';
+    case 'rent': return 'pay';
+    case 'buy': return 'buy';
+    case 'build': return t.includes('酒店') ? 'hotel' : 'build';
+    case 'card': return 'card';
+    case 'jail':
+      if (t.includes('出狱') || t.includes('重获自由') || t.includes('保释') || t.includes('用「')) return 'free';
+      return 'jail';
+    case 'trade': return 'trade';
+    case 'bad': return 'bankrupt';
+    case 'win': return 'win';
+    default: return '';
+  }
 }
 
 // 事件播报：收租、扣钱、买地、建房、抽卡、进出监狱……都单独播一条
@@ -940,6 +1240,7 @@ function detectLogBanners(S) {
         <div class="tb-kicker">${actor ? `<i class="tb-e-dot" style="--c:${actor.color}"></i>` : ''}${EVENT_LABEL[l.kind] || '岛上报事'}</div>
         <div class="tb-text">${esc(l.text)}</div>
         ${chip}`,
+      sound: soundForLog(l),
     });
   });
 }
@@ -950,8 +1251,10 @@ function queueBanner(item) {
   pumpBanner();
 }
 
-// 棋子正在走（或刚落地还没停稳）时，任何播报都要排队等
+// 棋子正在走（或刚落地还没停稳）时，任何播报都要排队等。
+// 段间停住时反过来：棋子不走，让播报先出来。
 function tokensSettling() {
+  if (store.moveHold) return false;
   return pendingMove() || !!store.moveTimer || Date.now() < store.moveSettleAt;
 }
 
@@ -961,7 +1264,11 @@ function schedulePump(ms) {
 }
 
 function pumpBanner() {
-  if (!store.bannerQueue.length) return;
+  if (!store.bannerQueue.length) {
+    // 段间停顿但这一趟没有播报可放（日志被过滤了）：别干等到兜底，直接接着走
+    if (store.moveHold && !store.moveResumeTimer) resumeMove();
+    return;
+  }
   if (tokensSettling()) {
     schedulePump(130);
     return;
@@ -995,7 +1302,9 @@ function showBanner(item) {
   const el = document.createElement('div');
   el.className = `bc-banner ${item.type}`;
   el.style.setProperty('--c', item.color);
-  el.innerHTML = item.html;
+  // 停在段间时，这条播报就是"棋子要动"的由头，把去向写进卡片里
+  el.innerHTML = item.html + (store.moveHint || '');
+  store.moveHint = null; // 只跟一条播报，别串到后面无关的播报上
 
   const rec = {
     el, type: item.type, endsAt: Date.now() + item.ms,
@@ -1008,6 +1317,9 @@ function showBanner(item) {
 
   store.bannerStack.push(rec);
   store.bannerLastShowAt = Date.now();
+  armMoveResume();                 // 这条播报正是上一段位移触发的，等它读完再走下一段
+  flushCashFx();                   // 钱和字幕一起出现，别抢在播报前面
+  if (item.sound) sfx(item.sound); // 声画同步：卡片出现的同时响
   layoutStack();         // 新的一条滑到位，旧的那条被顶上去
   syncBannerFlags();
   rec.timer = setTimeout(() => retireBanner(rec), item.ms);
@@ -1074,6 +1386,18 @@ function resetBannerCursor() {
   store.bannerUntil = 0;
   store.lastLogSeq = null;
   store.lastTurnKey = '';
+  store.moveQ.clear();
+  store.moveSeq = -1;
+  clearTimeout(store.moveHoldTimer);
+  clearTimeout(store.moveResumeTimer);
+  store.moveHoldTimer = null;
+  store.moveResumeTimer = null;
+  store.moveHold = false;
+  clearPrime();
+  clearTimeout(store.cashFxTimer);
+  store.cashFxTimer = null;
+  store.cashFxQueue = [];
+  store.cashPrev.clear(); // 新一局重新记基准，别开局就飘一堆金额
 }
 
 // 换房间 / 重开一局：把屏上的播报连定时器一起清干净
@@ -1100,7 +1424,7 @@ function flushVisuals() {
 function maybeAck() {
   const S = store.state;
   if (!S || S.phase !== 'playing' || !store.room) return;
-  if (store.bannerBusy || store.bannerQueue.length || tokensSettling()) return;
+  if (store.bannerBusy || store.bannerQueue.length || tokensSettling() || store.moveHold) return;
   if (Date.now() < store.bannerUntil) return;
   if (store.lastAck === S.version) return;
   const version = S.version;
@@ -1210,7 +1534,7 @@ function renderActions() {
   box.innerHTML = h;
   // 掷骰是「回合之间」的动作，要等播报和走子都放完；
   // 买地、放弃、结束回合这些「回合之内」的操作不等播报，只等自己的棋子落地
-  const moving = tokensSettling();
+  const moving = tokensSettling() || store.moveHold;
   const waitDice = Date.now() < store.bannerUntil || store.bannerBusy
     || store.bannerQueue.length > 0 || moving;
   box.classList.toggle('locked', waitDice);
@@ -1264,6 +1588,7 @@ function renderLog() {
 function openModal(html, opts = {}) {
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">${html}</div></div>`;
 }
+// 关闭弹窗不另外发声：关闭按钮本身会走通用点击音，避免在"建房"等动作上叠两层音
 function closeModal() {
   $('#modal-root').innerHTML = '';
 }

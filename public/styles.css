@@ -475,6 +475,41 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   background: rgba(76, 224, 179, 0.14); color: var(--green); font-weight: 700;
 }
 .pcash { font-size: 13px; color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
+/* 现金变动时在卡片右侧飘一个金额，加绿减红 */
+.cash-pop {
+  position: absolute; right: 10px; top: 50%; z-index: 3;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 800; letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  pointer-events: none;
+  animation: cash-pop 1.7s cubic-bezier(0.22, 0.9, 0.28, 1) forwards;
+}
+.cash-pop.gain {
+  color: #4ce0b3; background: rgba(76, 224, 179, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(76, 224, 179, 0.42);
+}
+.cash-pop.loss {
+  color: #ff9292; background: rgba(255, 146, 146, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 146, 146, 0.4);
+}
+@keyframes cash-pop {
+  0% { opacity: 0; transform: translateY(9px) scale(0.84); }
+  14% { opacity: 1; transform: translateY(0) scale(1.08); }
+  26% { opacity: 1; transform: translateY(-1px) scale(1); }
+  72% { opacity: 1; transform: translateY(-8px) scale(1); }
+  100% { opacity: 0; transform: translateY(-19px) scale(0.98); }
+}
+/* 金额数字本身跟着闪一下，再回到原本的金色 */
+.pcash.flash-gain { animation: cash-flash-gain 0.95s ease-out; }
+.pcash.flash-loss { animation: cash-flash-loss 0.95s ease-out; }
+@keyframes cash-flash-gain {
+  0% { color: #4ce0b3; text-shadow: 0 0 11px rgba(76, 224, 179, 0.6); }
+  100% { color: var(--gold); text-shadow: none; }
+}
+@keyframes cash-flash-loss {
+  0% { color: #ff9292; text-shadow: 0 0 11px rgba(255, 146, 146, 0.55); }
+  100% { color: var(--gold); text-shadow: none; }
+}
 .pname .pbot { font-size: 9.5px; opacity: 0.75; }
 .pmeta { font-size: 10px; color: var(--muted); margin-top: 2px; display: flex; gap: 8px; }
 .pmeta .jail { color: #ffa48f; }
@@ -620,6 +655,26 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 .cell.owned { background: color-mix(in srgb, var(--own) 12%, #0b1727); }
 .cell.owned:hover { background: color-mix(in srgb, var(--own) 18%, #0b1727); }
 .cell.owned .cell-main { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75); }
+/* 二段位移的目标格：棋子还没动，先把要去的那格点亮，让去向一眼可见 */
+.cell.target {
+  z-index: 3;
+  animation: cell-target 0.72s ease-in-out infinite;
+}
+.cell.target::before {
+  content: ''; position: absolute; inset: 0; z-index: 1;
+  border: 2px solid #ffd479;
+  box-shadow: inset 0 0 20px -4px #ffd479, 0 0 22px -2px rgba(255, 212, 121, 0.6);
+  pointer-events: none;
+}
+/* 后退用青色，和"往前走"区分开 */
+.cell.target-back::before {
+  border-color: #6fe0bd;
+  box-shadow: inset 0 0 20px -4px #6fe0bd, 0 0 22px -2px rgba(111, 224, 189, 0.6);
+}
+@keyframes cell-target {
+  0%, 100% { background: #16304d; }
+  50% { background: #23507d; }
+}
 .cell.mortgaged { filter: saturate(0.25) brightness(0.8); }
 .cell.mortgaged::after {
   content: "抵押"; position: absolute; z-index: 3;
@@ -825,6 +880,28 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   color: #ff9292; background: rgba(255, 146, 146, 0.10);
   box-shadow: inset 0 0 0 1px rgba(255, 146, 146, 0.34);
 }
+/* 二段位移的去向：这条播报说完，棋子就要动去哪 */
+.bc-banner .tb-move-hint {
+  display: flex; align-items: center; justify-content: center; gap: 0.45em;
+  margin-top: 2.4%; padding-top: 2%;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: clamp(8px, 1.15cqw, 13px); font-weight: 600;
+  letter-spacing: 0.06em; color: var(--gold);
+}
+.bc-banner .tb-move-hint.back { color: #6fe0bd; }
+.bc-banner .tb-move-hint .mh-arrow {
+  font-size: 1.2em; line-height: 1;
+  animation: mh-nudge 0.72s ease-in-out infinite;
+}
+.bc-banner .tb-move-hint.back .mh-arrow { animation-name: mh-nudge-back; }
+@keyframes mh-nudge {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(3px); }
+}
+@keyframes mh-nudge-back {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-3px); }
+}
 
 /* 棋子 */
 .bc-tokens { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
@@ -855,6 +932,41 @@ input.name-flash { animation: nameFlash 0.45s ease; }
     0 0 22px -3px var(--c);
 }
 .token.dead { display: none; }
+/* 二段位移前的蓄力：棋子抬起来呼吸，外圈放脉冲，明确"这颗要动了" */
+.token.primed {
+  z-index: 8;
+  animation: token-prime 0.62s ease-in-out infinite;
+}
+@keyframes token-prime {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    box-shadow:
+      inset 0 2px 3px rgba(255, 255, 255, 0.22),
+      inset 0 -3px 5px rgba(0, 0, 0, 0.55),
+      0 0 0 1px rgba(0, 0, 0, 0.6),
+      0 4px 10px -2px #000,
+      0 0 16px -3px var(--c);
+  }
+  50% {
+    transform: translate(-50%, -64%) scale(1.3);
+    box-shadow:
+      inset 0 2px 3px rgba(255, 255, 255, 0.34),
+      inset 0 -3px 5px rgba(0, 0, 0, 0.55),
+      0 0 0 1px rgba(0, 0, 0, 0.6),
+      0 9px 16px -2px #000,
+      0 0 26px 2px var(--c);
+  }
+}
+.token.primed::after {
+  content: ''; position: absolute; inset: -5px;
+  border-radius: 50%; border: 2px solid var(--c);
+  animation: token-ring 0.9s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes token-ring {
+  0% { opacity: 0.9; transform: scale(0.72); }
+  100% { opacity: 0; transform: scale(1.95); }
+}
 
 
 /* 右侧操作 */
@@ -1211,6 +1323,41 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 .theme-btn:hover { color: var(--green); border-color: rgba(76, 224, 179, 0.4); }
 .theme-btn span:first-child { font-size: 12px; line-height: 1; }
 
+/* 声音设置面板 */
+.audio-wrap { position: relative; }
+.audio-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 60;
+  width: 208px; padding: 12px 13px 11px;
+  border-radius: 12px; text-align: left;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 60px -26px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(76, 224, 179, 0.05);
+}
+.audio-pop.hidden { display: none; }
+.ap-title {
+  font-size: 11px; letter-spacing: 0.22em; color: var(--green);
+  opacity: 0.75; margin-bottom: 10px;
+}
+.ap-row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; color: var(--text); margin-bottom: 9px;
+}
+.ap-row span { width: 30px; flex: none; color: var(--muted); }
+.ap-row input[type="range"] {
+  flex: 1; height: 3px; appearance: none; -webkit-appearance: none;
+  border-radius: 999px; background: var(--line); cursor: pointer;
+}
+.ap-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 8px -1px rgba(76, 224, 179, 0.8);
+}
+.ap-row input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px; border: none; border-radius: 50%; background: var(--green);
+}
+.audio-pop .btn { margin-top: 2px; }
+.audio-pop .btn.on { color: var(--red); border-color: rgba(239, 91, 76, 0.45); }
+.ap-note { margin: 8px 0 0; font-size: 10.5px; color: var(--muted); opacity: 0.8; }
+
 /* ════════════════════════════════════════════
    浅色主题 · 白昼群岛
    仅覆盖变量与硬编码色块，布局一律不动
@@ -1306,6 +1453,24 @@ html[data-theme="light"] .pcard.active {
 }
 html[data-theme="light"] .pav { background: #ffffff; box-shadow: inset 0 0 12px -6px var(--c); }
 html[data-theme="light"] .pmeta .jail { color: #b0462a; }
+html[data-theme="light"] .cash-pop.gain {
+  color: #0a7a5c; background: rgba(15, 155, 118, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(15, 155, 118, 0.4);
+}
+html[data-theme="light"] .cash-pop.loss {
+  color: #b8332a; background: rgba(207, 68, 51, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(207, 68, 51, 0.36);
+}
+html[data-theme="light"] .pcash.flash-gain { animation-name: cash-flash-gain-light; }
+html[data-theme="light"] .pcash.flash-loss { animation-name: cash-flash-loss-light; }
+@keyframes cash-flash-gain-light {
+  0% { color: #0a7a5c; text-shadow: 0 0 11px rgba(15, 155, 118, 0.5); }
+  100% { color: var(--gold); text-shadow: none; }
+}
+@keyframes cash-flash-loss-light {
+  0% { color: #b8332a; text-shadow: 0 0 11px rgba(207, 68, 51, 0.45); }
+  100% { color: var(--gold); text-shadow: none; }
+}
 html[data-theme="light"] .bc-bank-row { color: rgba(23, 39, 58, 0.55); }
 html[data-theme="light"] .bc-bank-row b { color: #9a6a14; }
 html[data-theme="light"] .chat-form input { background: #ffffff; border-color: rgba(28, 58, 92, 0.16); }

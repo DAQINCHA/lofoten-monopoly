@@ -73,6 +73,10 @@ export function createRoom(name) {
     chancePtr: 0,
     chestPtr: 0,
     bank: { houses: HOUSE_SUPPLY, hotels: HOTEL_SUPPLY },
+    // 棋子位移轨迹：一次行动里可能走好几段（先到卡格再后退、被送进监狱直接飞过去），
+    // 按顺序记下来交给前端照着演，前端不用再靠"最短路径"猜方向
+    trails: {},
+    moveSeq: 0,
     createdAt: Date.now(),
   };
   room.chanceOrder = shuffle(CHANCE.map((_, i) => i));
@@ -274,6 +278,8 @@ export function snapshot(room) {
     winnerId: room.winnerId,
     endReason: room.endReason,
     turnLimit: room.turnLimit,
+    // 本次行动里棋子的位移轨迹（分段的），前端照着演；moveSeq 变了才是一条新轨迹
+    moveSeq: room.moveSeq || 0,
     cells: room.cells,
     bank: room.bank,
     log: room.log.slice(-70),
@@ -287,6 +293,7 @@ export function snapshot(room) {
       emoji: p.emoji,
       cash: p.cash,
       pos: p.pos,
+      path: (room.trails && room.trails[p.id]) || [],
       inJail: p.inJail,
       jailTurns: p.jailTurns,
       cards: p.cards,
@@ -370,6 +377,8 @@ function startGame(room, playerId) {
   room.chestPtr = 0;
   room.chanceOrder = shuffle(CHANCE.map((_, i) => i));
   room.chestOrder = shuffle(CHEST.map((_, i) => i));
+  room.trails = {};
+  room.moveSeq = (room.moveSeq || 0) + 1; // 所有人回到起点，别照旧轨迹倒着走一圈
   room.log = [];
   pushLog(room, `游戏开始，每人 ${kr(START_CASH)}。愿极光眷顾你。`, 'sys');
   pushLog(
@@ -440,10 +449,19 @@ function salary(room, p, opts = {}) {
   pushLog(room, `${lead}，领到 ${kr(SALARY)} 的${what}`, 'money', SALARY);
 }
 
+// 记一段位移：mode = walk 顺时针逐格 / back 逆时针逐格（只有卡牌的"后退 N 格"是 back）
+function markMove(room, p, from, to, mode) {
+  if (from === to) return;
+  if (!room.trails) room.trails = {};
+  const list = room.trails[p.id] || (room.trails[p.id] = []);
+  list.push({ from, to, mode });
+}
+
 // 返回是否刚领过津贴，好让落地播报别再重复一句
 function moveBy(room, p, steps) {
   const before = p.pos;
   p.pos = (p.pos + steps) % BOARD_SIZE;
+  markMove(room, p, before, p.pos, steps >= 0 ? 'walk' : 'back');
   if (p.pos < before) {
     salary(room, p, { landed: p.pos === 0 });
     return true;
@@ -452,7 +470,11 @@ function moveBy(room, p, steps) {
 }
 
 function sendToJail(room, p, opts = {}) {
-  p.pos = BOARD.indexOf(BOARD.find((c) => c.type === 'jail'));
+  const before = p.pos;
+  const jailIdx = BOARD.findIndex((c) => c.type === 'jail');
+  p.pos = jailIdx;
+  // 进监狱也顺着棋盘顺时针走过去（不领津贴）
+  markMove(room, p, before, p.pos, 'walk');
   p.inJail = true;
   p.jailTurns = 0;
   room.canRoll = false;
@@ -618,7 +640,10 @@ function drawCard(room, p, which, depth) {
     return;
   }
   if (typeof card.back === 'number') {
+    // 先按骰子走到卡格（上一段已经记过），再一步步退回去，别把两段合并成一次到位
+    const before = p.pos;
     p.pos = (p.pos - card.back + BOARD_SIZE) % BOARD_SIZE;
+    markMove(room, p, before, p.pos, 'back');
     resolveLanding(room, p, depth + 1);
     return;
   }
@@ -626,7 +651,10 @@ function drawCard(room, p, which, depth) {
     const target = card.moveToName ? INDEX_BY_NAME.get(card.moveToName) : card.moveTo;
     if (typeof target !== 'number') return;
     const passed = target <= p.pos;
+    const before = p.pos;
     p.pos = target;
+    // 「前往某地」一律顺时针前进（可能绕过起点领津贴），同样是接着上一段走
+    markMove(room, p, before, p.pos, 'walk');
     if (passed) salary(room, p, { landed: target === 0 });
     resolveLanding(room, p, depth + 1, { salaryPaid: passed });
   }
@@ -816,6 +844,9 @@ function chat(room, p, text) {
   return { ok: true };
 }
 
+// 这些操作会让棋子动起来，每次都重新开一条位移轨迹
+const MOVE_ACTIONS = new Set(['roll', 'jailRoll']);
+
 export function act(room, playerId, action) {
   const p = byId(room, playerId);
   if (!p) return { error: '玩家不存在' };
@@ -848,6 +879,8 @@ export function act(room, playerId, action) {
     room.turnNo = 1;
     room.winnerId = null;
     room.endReason = null;
+    room.trails = {};
+    room.moveSeq = (room.moveSeq || 0) + 1;
     room.players.forEach((x) => {
       x.bankrupt = false;
       x.cash = START_CASH;
@@ -865,6 +898,12 @@ export function act(room, playerId, action) {
   if (room.phase !== 'playing') return { error: '游戏还没有开始' };
   if (p.bankrupt) return { error: '你已经出局了' };
   const isTurn = cur(room)?.id === p.id;
+
+  // 会移动棋子的操作：开新的位移轨迹，前端据此一段一段演
+  if (MOVE_ACTIONS.has(type)) {
+    room.trails = {};
+    room.moveSeq = (room.moveSeq || 0) + 1;
+  }
 
   switch (type) {
     case 'roll': {

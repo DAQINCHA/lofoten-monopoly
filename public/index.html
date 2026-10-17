@@ -30,6 +30,18 @@
   </div>
   <div class="topbar-right">
     <span id="conn" class="conn off"><i></i>连接中</span>
+    <div class="audio-wrap">
+      <button id="btn-audio" class="theme-btn" title="声音设置" aria-label="声音设置">
+        <span id="audio-icon">🔊</span>
+      </button>
+      <div id="audio-pop" class="audio-pop hidden">
+        <div class="ap-title">声音</div>
+        <label class="ap-row"><span>音乐</span><input id="vol-music" type="range" min="0" max="100" step="1" /></label>
+        <label class="ap-row"><span>音效</span><input id="vol-sfx" type="range" min="0" max="100" step="1" /></label>
+        <button id="btn-mute" class="btn ghost tiny block">全部静音</button>
+        <p class="ap-note">按 M 键快速静音</p>
+      </div>
+    </div>
     <button id="btn-theme" class="theme-btn" title="切换到浅色主题">
       <span id="theme-icon">☾</span><span id="theme-label">浅色</span>
     </button>
