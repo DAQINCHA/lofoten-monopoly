@@ -2,6 +2,7 @@
 import {
   BOARD, GROUPS, GROUP_CELLS, CHANCE, CHEST, INDEX_BY_NAME,
   START_CASH, SALARY, JAIL_FINE, HOUSE_SUPPLY, HOTEL_SUPPLY, MAX_PLAYERS, BOARD_SIZE,
+  UTIL_RENT_PER_PIP, UTIL_RENT_BOTH,
 } from './board.js';
 import { BOT_NAMES, chooseBotAction } from './bot.js';
 
@@ -319,6 +320,9 @@ function netWorth(room, p) {
   return v;
 }
 
+// 日志里的金额统一带千分位，读起来不费劲
+const kr = (n) => 'kr ' + Number(n).toLocaleString('en-US');
+
 function pushLog(room, text, kind = 'sys', delta = 0, opts = {}) {
   // delta：本条的现金增减，前端用不同颜色标出「得」与「失」
   // seq：单调递增序号，前端靠它识别"哪些是刚发生的"，用来逐条大屏播报
@@ -367,7 +371,7 @@ function startGame(room, playerId) {
   room.chanceOrder = shuffle(CHANCE.map((_, i) => i));
   room.chestOrder = shuffle(CHEST.map((_, i) => i));
   room.log = [];
-  pushLog(room, `游戏开始，每人 kr ${START_CASH}。愿极光眷顾你。`, 'sys');
+  pushLog(room, `游戏开始，每人 ${kr(START_CASH)}。愿极光眷顾你。`, 'sys');
   pushLog(
     room,
     `🎲 出手顺序：${room.players.map((p, i) => `${i + 1}. ${p.name}（${orderSum(p)} 点）`).join(' → ')}`,
@@ -428,7 +432,7 @@ const G = (i) => BOARD[i];
 
 function salary(room, p) {
   p.cash += SALARY;
-  pushLog(room, `${p.name} 绕过最后一道礁石回到旅程起点，领到 kr ${SALARY} 的过路津贴`, 'money', SALARY);
+  pushLog(room, `${p.name} 绕过最后一道礁石回到旅程起点，领到 ${kr(SALARY)} 的过路津贴`, 'money', SALARY);
 }
 
 function moveBy(room, p, steps) {
@@ -481,7 +485,7 @@ function resolveLanding(room, p, depth = 0) {
     case 'util': {
       if (!st.owner) {
         room.pending = { type: 'buy', index: p.pos };
-        pushLog(room, `${p.name} 闯进「${cell.name}」，地主家的门锁还没上——kr ${cell.price} 就能签下地契`, 'sys');
+        pushLog(room, `${p.name} 闯进「${cell.name}」，地主家的门锁还没上——${kr(cell.price)} 就能签下地契`, 'sys');
         return;
       }
       if (st.owner === p.id) {
@@ -505,15 +509,16 @@ function resolveLanding(room, p, depth = 0) {
 }
 
 // 「渔市议价券」一类的保留卡：付租时自动抵掉一半，用掉即失效
+// 小额租金（不到 kr 6,000）不值得动用，留着应付更贵的落点
 function applyRentVoucher(room, p, rent, place) {
-  if (!rent || rent < 60) return rent;
+  if (!rent || rent < 6000) return rent;
   if (!(p.held || []).some((c) => c.kind === 'rent')) return rent;
   const card = spendHeld(p, 'rent');
   if (!card) return rent;
   const cut = Math.ceil(rent / 2);
   pushLog(
     room,
-    `${p.name} 亮出「${card.title}」，把「${place}」的租金压到 kr ${rent - cut}`,
+    `${p.name} 亮出「${card.title}」，把「${place}」的租金压到 ${kr(rent - cut)}`,
     'card',
     cut,
     { quiet: true },
@@ -536,7 +541,7 @@ function rentOf(room, index, diceSum) {
   }
   if (cell.type === 'util') {
     const n = UTIL_INDEXES.filter((i) => room.cells[i].owner === st.owner).length;
-    return (diceSum || 7) * (n >= 2 ? 10 : 4);
+    return (diceSum || 7) * (n >= 2 ? UTIL_RENT_BOTH : UTIL_RENT_PER_PIP);
   }
   return 0;
 }
@@ -650,7 +655,7 @@ function liquidate(room, p, need) {
       c.mortgaged = true;
       const v = Math.floor(G(i).price / 2);
       p.cash += v;
-      pushLog(room, `${p.name} 急售「${G(i).name}」的抵押权，换回 kr ${v}`, 'money', v);
+      pushLog(room, `${p.name} 急售「${G(i).name}」的抵押权，换回 ${kr(v)}`, 'money', v);
       continue;
     }
     break;
@@ -664,16 +669,16 @@ function charge(room, p, amount, reason, creditor = null, opts = {}) {
     const paid = p.cash;
     p.cash = 0;
     if (creditor) creditor.cash += paid;
-    pushLog(room, `${p.name} 把口袋翻了个底朝天，也凑不出 kr ${amount}（${reason}）`, 'bad', -paid);
+    pushLog(room, `${p.name} 把口袋翻了个底朝天，也凑不出 ${kr(amount)}（${reason}）`, 'bad', -paid);
     bankrupt(room, p, creditor);
     return false;
   }
   p.cash -= amount;
   if (creditor) {
     creditor.cash += amount;
-    if (!opts.quiet) pushLog(room, `${p.name} 把 kr ${amount} 塞进 ${creditor.name} 手里 · ${reason}`, 'rent', -amount);
+    if (!opts.quiet) pushLog(room, `${p.name} 把 ${kr(amount)} 塞进 ${creditor.name} 手里 · ${reason}`, 'rent', -amount);
   } else if (!opts.quiet) {
-    pushLog(room, `${p.name} 向银行上缴 kr ${amount} · ${reason}`, 'money', -amount);
+    pushLog(room, `${p.name} 向银行上缴 ${kr(amount)} · ${reason}`, 'money', -amount);
   }
   return true;
 }
@@ -738,8 +743,8 @@ function offerTrade(room, p, data) {
   if (!to || to.bankrupt || to.id === p.id) return { error: '对方不能交易' };
   const give = (data.give || []).filter((i) => Number.isInteger(i) && room.cells[i]?.owner === p.id);
   const get = (data.get || []).filter((i) => Number.isInteger(i) && room.cells[i]?.owner === to.id);
-  const giveCash = Math.max(0, Math.min(9999, Math.floor(+data.giveCash || 0)));
-  const getCash = Math.max(0, Math.min(9999, Math.floor(+data.getCash || 0)));
+  const giveCash = Math.max(0, Math.min(999999, Math.floor(+data.giveCash || 0)));
+  const getCash = Math.max(0, Math.min(999999, Math.floor(+data.getCash || 0)));
   if (giveCash > p.cash) return { error: '现金不够' };
   if (getCash > to.cash) return { error: '对方现金不够' };
   if (!give.length && !get.length && !giveCash && !getCash) return { error: '交易内容为空' };
@@ -888,7 +893,7 @@ export function act(room, playerId, action) {
       p.cash -= cell.price;
       room.cells[idx].owner = p.id;
       room.pending = null;
-      pushLog(room, `${p.name} 把 kr ${cell.price} 拍在柜台上，「${cell.name}」归自己了`, 'buy', -cell.price);
+      pushLog(room, `${p.name} 把 ${kr(cell.price)} 拍在柜台上，「${cell.name}」归自己了`, 'buy', -cell.price);
       if (room.rollAgain && !p.inJail) room.canRoll = true;
       return { ok: true };
     }
@@ -917,7 +922,7 @@ export function act(room, playerId, action) {
       p.jailTurns = 0;
       room.pending = null;
       room.canRoll = true;
-      pushLog(room, `${p.name} 掏了 kr ${JAIL_FINE} 保释金，铁门在身后哐当一声`, 'jail', -JAIL_FINE);
+      pushLog(room, `${p.name} 掏了 ${kr(JAIL_FINE)} 保释金，铁门在身后哐当一声`, 'jail', -JAIL_FINE);
       return { ok: true };
     }
 
@@ -1063,7 +1068,7 @@ function mortgage(room, p, idx) {
   st.mortgaged = true;
   const v = Math.floor(cell.price / 2);
   p.cash += v;
-  pushLog(room, `${p.name} 把「${cell.name}」押给银行，换回 kr ${v}`, 'money', v);
+  pushLog(room, `${p.name} 把「${cell.name}」押给银行，换回 ${kr(v)}`, 'money', v);
   return { ok: true };
 }
 
@@ -1073,7 +1078,7 @@ function unmortgage(room, p, idx) {
   if (st.owner !== p.id) return { error: '这不是你的地产' };
   if (!st.mortgaged) return { error: '没有抵押' };
   const cost = Math.ceil((cell.price / 2) * 1.1);
-  if (p.cash < cost) return { error: `赎回需要 kr ${cost}` };
+  if (p.cash < cost) return { error: `赎回需要 ${kr(cost)}` };
   p.cash -= cost;
   st.mortgaged = false;
   pushLog(room, `${p.name} 还清欠款，赎回了「${cell.name}」`, 'money', -cost);

@@ -31,6 +31,11 @@ const store = {
   lastDice: '',
   endShown: false,
   screen: 'lobby',
+  lastPlayersKey: '',
+  lastLogRenderKey: '',
+  lastTurnLine: '',
+  cellState: [],
+  boardSize: { bw: 1, tw: 16 },
 };
 
 const money = (n) => 'kr ' + Number(n).toLocaleString('en-US');
@@ -137,6 +142,12 @@ function bindUI() {
 
   // 播报与走子都放完后回报服务端，机器人靠这个节拍继续行动
   setInterval(maybeAck, 300);
+
+  // 视口变化时棋盘尺寸会变，重测缓存并重排棋子
+  window.addEventListener('resize', () => {
+    store.boardSize.bw = 1;
+    if (store.state && store.state.phase !== 'lobby') paintTokens();
+  });
 
   $('#btn-theme').addEventListener('click', () => {
     applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
@@ -245,11 +256,26 @@ function enterRoom(r) {
   store.lastAck = null;
   store.lastTurnKey = '';
   store.lastChatKey = null;
+  store.lastPlayersKey = '';
+  store.lastLogRenderKey = '';
+  store.lastTurnLine = '';
+  store.cellState = store.cellState.map(() => ({ ownId: null, mortgaged: null, houses: -1 }));
   localStorage.setItem('lofoten:token:' + r.roomId, r.token);
   history.replaceState(null, '', `?r=${r.roomId}`);
   $('#btn-copy').classList.remove('hidden');
   $('#btn-exit').classList.remove('hidden');
   connect();
+}
+
+// SSE 推送可能一帧内连到多条，用 rAF 合并成一次渲染
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+  });
 }
 
 function connect() {
@@ -258,8 +284,8 @@ function connect() {
   store.es = es;
   es.onopen = () => setConn(true);
   es.onmessage = (ev) => {
-    store.state = JSON.parse(ev.data);
-    render();
+    try { store.state = JSON.parse(ev.data); } catch { return; }
+    scheduleRender();
   };
   es.onerror = () => setConn(false);
 }
@@ -408,8 +434,8 @@ function renderGame() {
   renderChat();
   const bh = $('#bank-houses');
   const bhh = $('#bank-hotels');
-  if (bh) bh.textContent = S.bank.houses;
-  if (bhh) bhh.textContent = S.bank.hotels;
+  if (bh && bh.textContent !== String(S.bank.houses)) bh.textContent = S.bank.houses;
+  if (bhh && bhh.textContent !== String(S.bank.hotels)) bhh.textContent = S.bank.hotels;
 }
 
 // ────────────── 局内聊天 ──────────────
@@ -469,6 +495,14 @@ function isMyTurn() {
 
 function renderPlayers() {
   const S = store.state;
+  // 内容没变就跳过，避免每次 SSE 推送都重建整列玩家卡
+  const key = S.players.map((p) =>
+    [p.id, p.name, p.emoji, p.color, p.cash, p.props.length, p.cards,
+     (p.held || []).map((c) => c.kind).join(''),
+     p.inJail ? 1 : 0, p.bankrupt ? 1 : 0, p.connected ? 1 : 0, p.isBot ? 1 : 0].join(',')
+  ).join('|') + '@' + (S.phase === 'playing' ? String(S.current) : '-');
+  if (store.lastPlayersKey === key) return;
+  store.lastPlayersKey = key;
   $('#players').innerHTML = S.players.map((p) => {
     const active = S.players[S.current]?.id === p.id && S.phase === 'playing';
     const vouchers = (p.held || []).filter((c) => c.kind === 'rent').length;
@@ -555,6 +589,7 @@ function buildBoard() {
   $$('.cell', board).forEach((n) => n.remove());
   const frag = document.createDocumentFragment();
   store.cellEls = [];
+  store.cellState = [];
   store.board.forEach((c, i) => {
     const [row, col] = coord(i);
     const el = document.createElement('div');
@@ -570,7 +605,13 @@ function buildBoard() {
     el.innerHTML = html;
     el.addEventListener('click', () => openProperty(i));
     frag.appendChild(el);
-    store.cellEls[i] = el;
+    // 缓存子元素引用，之后每次状态推送就不用再 querySelector 了
+    store.cellEls[i] = {
+      el,
+      mark: el.querySelector('.cell-mark'),
+      houses: el.querySelector('.cell-houses'),
+    };
+    store.cellState[i] = { ownId: null, mortgaged: null, houses: -1 };
   });
   board.appendChild(frag);
 }
@@ -578,27 +619,36 @@ function buildBoard() {
 function renderBoardState() {
   const S = store.state;
   store.board.forEach((c, i) => {
-    const el = store.cellEls[i];
-    if (!el) return;
+    const refs = store.cellEls[i];
+    if (!refs) return;
     const st = S.cells[i];
-    const owner = st.owner ? playerById(st.owner) : null;
+    const cache = store.cellState[i];
+    const ownId = st.owner || '';
+    const mortgaged = !!st.mortgaged;
+    const houses = st.houses || 0;
+    // 业主 / 抵押 / 房屋都没变，这格完全不用碰 DOM
+    if (cache.ownId === ownId && cache.mortgaged === mortgaged && cache.houses === houses) return;
+    cache.ownId = ownId;
+    cache.mortgaged = mortgaged;
+    cache.houses = houses;
+
+    const { el, mark, houses: houseBox } = refs;
+    const owner = ownId ? playerById(ownId) : null;
     el.classList.toggle('owned', !!owner);
-    el.classList.toggle('mortgaged', !!st.mortgaged);
+    el.classList.toggle('mortgaged', mortgaged);
     if (owner) {
       el.style.setProperty('--own', owner.color);
     } else {
       el.style.removeProperty('--own');
     }
-    const mark = el.querySelector('.cell-mark');
     if (mark) {
       mark.style.display = owner ? 'block' : 'none';
       if (owner) mark.style.background = owner.color;
     }
-    const houses = el.querySelector('.cell-houses');
-    if (houses) {
-      if (st.houses === 5) houses.innerHTML = '<span class="hotel"></span>';
-      else if (st.houses > 0) houses.innerHTML = '<span class="house"></span>'.repeat(st.houses);
-      else houses.innerHTML = '';
+    if (houseBox) {
+      if (houses === 5) houseBox.innerHTML = '<span class="hotel"></span>';
+      else if (houses > 0) houseBox.innerHTML = '<span class="house"></span>'.repeat(houses);
+      else houseBox.innerHTML = '';
     }
   });
 }
@@ -621,6 +671,7 @@ function renderTokens() {
       layer.appendChild(el);
       store.tokenEls.set(p.id, el);
       store.viewPos.set(p.id, p.pos); // 首次出现直接就位，不做补间
+      measureBoard(); // 有了真实棋子，更新直径缓存
     }
     el.textContent = p.emoji;
     el.style.setProperty('--c', p.color);
@@ -684,14 +735,25 @@ function snapTokens() {
 
 // 每格左上角起手：第一颗贴角，第二颗排在它右边，依此类推
 const CELL_PCT = 100 / 11;
+
+// 棋盘宽度与棋子直径缓存下来，避免走子动画每步都触发强制回流；
+// 棋盘隐藏时 clientWidth 为 0，用 bw<=1 作"待重测"标记
+function measureBoard() {
+  const board = $('#board');
+  if (!board) return;
+  store.boardSize.bw = board.clientWidth || 1;
+  const sample = store.tokenEls.values().next().value;
+  store.boardSize.tw = sample ? sample.offsetWidth || 16 : 16;
+}
+
 function paintTokens() {
   const S = store.state;
   const board = $('#board');
   if (!S || !board) return;
-  const bw = board.clientWidth || 1;
-  const sample = store.tokenEls.values().next().value;
-  const tw = sample ? sample.offsetWidth || 16 : 16; // 棋子直径（px），跟随 CSS clamp
-  const tok = (tw / bw) * 100;                        // 转成棋盘百分比
+  if (store.boardSize.bw <= 1) measureBoard();
+  const bw = store.boardSize.bw;
+  const tw = store.boardSize.tw;              // 棋子直径（px），跟随 CSS clamp
+  const tok = (tw / bw) * 100;                // 转成棋盘百分比
   const gap = tok * 0.16;
   const inset = tok * 0.16;
 
@@ -783,8 +845,11 @@ function renderCenter() {
     else if (S.canRoll) hint = me ? '掷骰子，出发' : (p.isBot ? '机器人正在掷骰…' : '等待掷骰…');
     else hint = me ? '可以结束回合了' : (p.isBot ? '机器人正在行动…' : '等待操作…');
   }
-  $('#board-turn').innerHTML =
-    `${esc(turnText)}` + (S.phase === 'ended' ? '' : `<span class="turn-clock">${clock}</span>`);
+  const line = `${esc(turnText)}` + (S.phase === 'ended' ? '' : `<span class="turn-clock">${clock}</span>`);
+  if (store.lastTurnLine !== line) {
+    $('#board-turn').innerHTML = line;
+    store.lastTurnLine = line;
+  }
   $('#board-hint').textContent = hint;
 }
 
@@ -1073,6 +1138,11 @@ function tradeOfferCard(t, canAnswer) {
 function renderLog() {
   const S = store.state;
   const box = $('#log');
+  // 日志是 append-only 的，长度 + 末条 seq 不变说明没有新内容
+  const last = S.log[S.log.length - 1];
+  const key = S.log.length + ':' + (last ? last.seq || 0 : 0);
+  if (store.lastLogRenderKey === key) return;
+  store.lastLogRenderKey = key;
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   box.innerHTML = S.log
     .map((l) => {

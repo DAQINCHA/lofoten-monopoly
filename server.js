@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { BOARD, GROUPS, CHANCE, CHEST, START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS } from './src/board.js';
+import { BOARD, GROUPS, CHANCE, CHEST, START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS, UTIL_RENT_PER_PIP, UTIL_RENT_BOTH } from './src/board.js';
 import {
   createRoom, getRoom, joinRoom, leaveRoom, markDisconnected,
   snapshot, act, nextBotStep, chooseBotAction,
@@ -197,7 +197,8 @@ const server = http.createServer(async (req, res) => {
   // ── API ──
   if (pathname === '/api/board') {
     return sendJson(res, 200, {
-      board: BOARD, groups: GROUPS, meta: { START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS },
+      board: BOARD, groups: GROUPS,
+      meta: { START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS, UTIL_RENT_PER_PIP, UTIL_RENT_BOTH },
       decks: { chance: CHANCE, chest: CHEST },
     });
   }

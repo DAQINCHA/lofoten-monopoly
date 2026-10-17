@@ -30,7 +30,7 @@ function baseValue(room, i) {
 }
 
 function playerCashReserve(p) {
-  return 120;
+  return 12000;
 }
 
 // ─────────────────────────── 买地 ───────────────────────────
@@ -43,7 +43,7 @@ function shouldBuy(room, p, idx) {
     !!cell.group && ownedInGroup(room, cell.group, p.id) === GROUP_CELLS[cell.group].length - 1;
 
   // 就差这一块成套：几乎必买
-  if (completes) return after >= 30;
+  if (completes) return after >= 3000;
 
   // 挡住别人成套
   const blocks =
@@ -53,17 +53,17 @@ function shouldBuy(room, p, idx) {
       if (!o || o === p.id) return false;
       return ownedInGroup(room, cell.group, o) === GROUP_CELLS[cell.group].length - 1;
     });
-  if (blocks) return after >= 70;
+  if (blocks) return after >= 7000;
 
   if (after < playerCashReserve(p)) return false;
-  if (cell.type === 'ferry') return after >= 180;
-  if (cell.type === 'util') return after >= 260;
-  return after >= 140;
+  if (cell.type === 'ferry') return after >= 18000;
+  if (cell.type === 'util') return after >= 26000;
+  return after >= 14000;
 }
 
 // ─────────────────────────── 建造 / 赎回 ───────────────────────────
 function chooseBuild(room, p) {
-  if (p.cash < 160) return null;
+  if (p.cash < 16000) return null;
   let best = null;
   for (const group of Object.keys(GROUP_CELLS)) {
     if (!isFullGroup(room, group, p.id)) continue;
@@ -74,13 +74,13 @@ function chooseBuild(room, p) {
     const candidates = cells.filter((i) => room.cells[i].houses === min);
     for (const i of candidates) {
       const cost = BOARD[i].houseCost || 0;
-      if (p.cash - cost < 140) continue;
+      if (p.cash - cost < 14000) continue;
       // 银行库存不够就别点，否则会反复点同一块地
       if (min === 4) {
         if (room.bank.hotels < 1 || room.bank.houses < 4) continue;
       } else if (room.bank.houses < 1) continue;
       // 优先选择地价更高（租金基数更高）的色组与地块
-      const score = BOARD[i].price + min * 40;
+      const score = BOARD[i].price + min * 4000;
       if (!best || score > best.score) best = { score, index: i };
     }
   }
@@ -88,7 +88,7 @@ function chooseBuild(room, p) {
 }
 
 function chooseUnmortgage(room, p) {
-  if (p.cash < 700) return null;
+  if (p.cash < 70000) return null;
   const free = room.cells
     .map((c, i) => ({ c, i }))
     .filter((x) => x.c.owner === p.id && x.c.mortgaged)
@@ -96,7 +96,7 @@ function chooseUnmortgage(room, p) {
   if (!free.length) return null;
   const { c, i } = free[0];
   const cost = Math.ceil((BOARD[i].price / 2) * 1.1);
-  if (p.cash - cost < 400) return null;
+  if (p.cash - cost < 40000) return null;
   return { type: 'unmortgage', index: i };
 }
 
@@ -138,7 +138,7 @@ function evaluateTrade(room, p, t) {
 // 只找持有自己缺口的「机器人」出价，避免报价闪一下就没了。
 function chooseTrade(room, p) {
   if (p.botTradeTried || room.trade) return null;
-  if (p.cash < 400) return null;
+  if (p.cash < 40000) return null;
 
   let best = null;
   for (const group of Object.keys(GROUP_CELLS)) {
@@ -152,7 +152,7 @@ function chooseTrade(room, p) {
 
     // 对方心里的底价：最后一块会被抬高 2.1 倍
     const price = Math.ceil(baseValue(room, missing) * 2.1 * 1.08);
-    if (p.cash - price < 220) continue;
+    if (p.cash - price < 22000) continue;
     const score = BOARD[missing].price;
     if (!best || score > best.score) best = { score, to: owner.id, index: missing, price };
   }
@@ -173,7 +173,7 @@ export function chooseBotAction(room, p) {
   // 2) 监狱
   if (p.inJail && room.pending?.type === 'jail') {
     if (p.cards > 0) return { type: 'jailCard' };
-    if (p.cash > JAIL_FINE + 220) return { type: 'jailPay' };
+    if (p.cash > JAIL_FINE + 22000) return { type: 'jailPay' };
     return { type: 'jailRoll' };
   }
 
