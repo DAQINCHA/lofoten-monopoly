@@ -20,11 +20,12 @@ const store = {
   lastTurnKey: '',
   turnKey: '',
   turnAt: 0,
-  bannerTimer: null,
   bannerUntil: 0,
   bannerQueue: [],
+  bannerStack: [],
   bannerBusy: false,
   bannerWaitTimer: null,
+  bannerLastShowAt: 0,
   lastLogSeq: null,
   lastAck: null,
   moveSettleAt: 0,
@@ -131,7 +132,7 @@ function bindUI() {
     if (type === 'openTrade') return openTrade();
     if (type === 'openRule') return openRule();
     if (type === 'openEnd') return openEnd();
-    if (type === 'restart') return act({ type: 'restart' });
+    if (type === 'restart') { resetBannerCursor(); return act({ type: 'restart' }); }
     if (type === 'respondTrade') return act({ type: 'respondTrade', accept: btn.dataset.accept === '1' });
     act(index === undefined ? { type } : { type, index });
   });
@@ -147,6 +148,7 @@ function bindUI() {
   window.addEventListener('resize', () => {
     store.boardSize.bw = 1;
     if (store.state && store.state.phase !== 'lobby') paintTokens();
+    layoutStack(); // 播报高度跟着棋盘变了，重新排一次
   });
 
   $('#btn-theme').addEventListener('click', () => {
@@ -249,12 +251,8 @@ function enterRoom(r) {
   store.token = r.token;
   store.me = r.playerId;
   // 换房间：把播报队列和游标清干净，避免上家的播报串进来
-  store.bannerQueue = [];
-  store.bannerBusy = false;
-  store.bannerUntil = 0;
-  store.lastLogSeq = null;
+  resetBannerCursor();
   store.lastAck = null;
-  store.lastTurnKey = '';
   store.lastChatKey = null;
   store.lastPlayersKey = '';
   store.lastLogRenderKey = '';
@@ -854,10 +852,18 @@ function renderCenter() {
 }
 
 // ────────────── 棋盘中央大屏播报 ──────────────
-// 所有播报排成一条队列，一次只放一条：棋子还在走、上一条还没收完，
-// 下一条就绝不会插进来，避免"这边还在走子、那边已经轮到下一家"。
+// 事件播报（收租 / 扣钱 / 买地……）可以叠着放：同一回合里连续的第二条
+// 会把上一条顶上去，两条先后挂在屏上，再按出场顺序依次消失，省掉一长串
+// 排队等待的时间。回合播报（换人 / 掷骰）仍然独占屏幕，等屏上清干净才播。
 const BANNER_TURN_MS = 1500;
-const BANNER_OUT_MS = 300;
+const BANNER_OUT_MS = 460;     // 淡出时长，与 CSS transition 对齐，等动画走完再摘掉
+const BANNER_STACK_MAX = 2;    // 同一时刻最多挂几条事件播报
+const BANNER_STAGGER_MS = 220; // 两条播报的最小出场间隔（>100ms）
+const BANNER_GAP_PX = 12;      // 上下两条之间的间距
+const BANNER_ENTER_PX = 18;    // 进场时从下方多远处滑上来
+const BANNER_ENTER_SCALE = 0.94;
+const BANNER_OUT_SCALE = 0.96;
+const BANNER_SINK_PX = 14;        // 淡出时轻轻下沉
 // 这两类不单独播报：掷骰由骰子动画代替，换人由回合播报代替
 const SILENT_KINDS = new Set(['roll', 'turn']);
 const EVENT_LABEL = {
@@ -927,8 +933,8 @@ function detectLogBanners(S) {
       : '';
     queueBanner({
       type: 'event',
-      // 文案越长，留的阅读时间越久
-      ms: Math.min(2050, 1150 + l.text.length * 18),
+      // 文案越长，留的阅读时间越久；两条能同时看，单条就不用停太久
+      ms: Math.min(1750, 950 + l.text.length * 15),
       color: l.kind === 'win' ? '#ffd479' : actor?.color || '#4ce0b3',
       html: `
         <div class="tb-kicker">${actor ? `<i class="tb-e-dot" style="--c:${actor.color}"></i>` : ''}${EVENT_LABEL[l.kind] || '岛上报事'}</div>
@@ -949,41 +955,138 @@ function tokensSettling() {
   return pendingMove() || !!store.moveTimer || Date.now() < store.moveSettleAt;
 }
 
+function schedulePump(ms) {
+  clearTimeout(store.bannerWaitTimer);
+  store.bannerWaitTimer = setTimeout(pumpBanner, ms);
+}
+
 function pumpBanner() {
-  if (store.bannerBusy || !store.bannerQueue.length) return;
+  if (!store.bannerQueue.length) return;
   if (tokensSettling()) {
-    clearTimeout(store.bannerWaitTimer);
-    store.bannerWaitTimer = setTimeout(pumpBanner, 130);
+    schedulePump(130);
     return;
   }
+  const next = store.bannerQueue[0];
+  const live = store.bannerStack;
+  // 回合播报独占屏幕；事件播报最多叠 BANNER_STACK_MAX 条
+  const soloing = live.some((r) => r.type !== 'event');
+  const full = next.type === 'event'
+    ? live.length >= BANNER_STACK_MAX
+    : live.length > 0;
+  if (soloing || full) {
+    schedulePump(140);
+    return;
+  }
+  // 两条播报的出场至少隔开 BANNER_STAGGER_MS，绝不挤在同一瞬间冒出来
+  const since = Date.now() - store.bannerLastShowAt;
+  if (since < BANNER_STAGGER_MS) {
+    schedulePump(BANNER_STAGGER_MS - since + 10);
+    return;
+  }
+
   showBanner(store.bannerQueue.shift());
+  // 后面还排着队？到点了再放下一条
+  if (store.bannerQueue.length) schedulePump(BANNER_STAGGER_MS);
 }
 
 function showBanner(item) {
-  const el = $('#turn-banner');
-  store.bannerBusy = true;
-  clearTimeout(store.bannerTimer);
+  const stack = $('#banner-stack');
+  if (!stack) return;
+  const el = document.createElement('div');
   el.className = `bc-banner ${item.type}`;
   el.style.setProperty('--c', item.color);
   el.innerHTML = item.html;
-  void el.offsetWidth; // 先落一帧，让淡入动画重新起跑
-  el.classList.add('show');
 
-  // 播报期间锁住操作，等这一条放完才轮到下一个行为
-  store.bannerUntil = Date.now() + item.ms;
-  renderActions();
+  const rec = {
+    el, type: item.type, endsAt: Date.now() + item.ms,
+    timer: null, outTimer: null, retiring: false,
+    dy: BANNER_ENTER_PX, scale: BANNER_ENTER_SCALE, opacity: 0,
+  };
+  paintBanner(rec);      // 起始态：缩小、透明、再往下一点点
+  stack.appendChild(el);
+  void el.offsetWidth;   // 先落一帧，让上面这行成为过渡的起点
 
-  store.bannerTimer = setTimeout(() => {
-    el.classList.add('out');
-    store.bannerUntil = 0;
-    store.bannerTimer = setTimeout(() => {
-      el.classList.remove('show', 'out');
-      store.bannerBusy = false;
-      renderActions();
-      flushVisuals(); // 被播报压住的掷骰 / 走子，现在接着放
-      pumpBanner();   // 再放下一条（会等走子停稳）
-    }, BANNER_OUT_MS);
-  }, item.ms);
+  store.bannerStack.push(rec);
+  store.bannerLastShowAt = Date.now();
+  layoutStack();         // 新的一条滑到位，旧的那条被顶上去
+  syncBannerFlags();
+  rec.timer = setTimeout(() => retireBanner(rec), item.ms);
+  renderActions();       // 播报期间锁住操作
+}
+
+// 从上往下算偏移量：最新的那条贴着锚点，其余依次往上排
+function layoutStack() {
+  const live = store.bannerStack;
+  let acc = 0;
+  for (let i = live.length - 1; i >= 0; i--) {
+    const rec = live[i];
+    if (rec.retiring) continue; // 正在淡出的不动它，别把它的收场动画打断
+    // 被顶上去也保持原样：不缩小、不半透明，每条播报只按自己的节奏来
+    rec.dy = -acc;
+    rec.scale = 1;
+    rec.opacity = 1;
+    paintBanner(rec);
+    acc += rec.el.offsetHeight + BANNER_GAP_PX;
+  }
+}
+
+// 位置和透明度写在一起，交给 CSS 的 transition 补间
+function paintBanner(rec) {
+  const base = rec.type === 'turn' ? '50%' : '0px'; // 回合播报以锚点为中心，事件播报贴下沿
+  rec.el.style.transform = `translate(-50%, calc(${base} + ${rec.dy}px)) scale(${rec.scale})`;
+  rec.el.style.opacity = rec.opacity;
+}
+
+// 到点了就收：先淡出、稍稍下沉，腾出位置后再放被压住的走子 / 下一条播报
+function retireBanner(rec) {
+  if (!store.bannerStack.includes(rec) || rec.retiring) return;
+  rec.retiring = true;
+  rec.dy += BANNER_SINK_PX;
+  rec.scale = BANNER_OUT_SCALE;
+  rec.opacity = 0;
+  paintBanner(rec);
+  rec.outTimer = setTimeout(() => {
+    rec.el.remove();
+    const i = store.bannerStack.indexOf(rec);
+    if (i >= 0) store.bannerStack.splice(i, 1);
+    syncBannerFlags();
+    layoutStack();
+    renderActions();
+    flushVisuals(); // 被播报压住的掷骰 / 走子，现在接着放
+    pumpBanner();
+  }, BANNER_OUT_MS);
+}
+
+// 屏上还有播报吗？顺便把"最晚什么时候解锁"记下来
+function syncBannerFlags() {
+  store.bannerBusy = store.bannerStack.length > 0;
+  store.bannerUntil = store.bannerStack.reduce((m, r) => Math.max(m, r.endsAt), 0);
+  const stack = $('#banner-stack');
+  // 事件播报整体下移一点，让开中央的骰子
+  if (stack) stack.classList.toggle('event-mode', store.bannerStack.some((r) => r.type === 'event'));
+}
+
+// 换房间 / 重开一局：屏上的播报、排队等待的播报一起作废
+function resetBannerCursor() {
+  clearBannerStack();
+  store.bannerQueue = [];
+  store.bannerBusy = false;
+  store.bannerUntil = 0;
+  store.lastLogSeq = null;
+  store.lastTurnKey = '';
+}
+
+// 换房间 / 重开一局：把屏上的播报连定时器一起清干净
+function clearBannerStack() {
+  store.bannerStack.forEach((r) => {
+    clearTimeout(r.timer);
+    clearTimeout(r.outTimer);
+    r.el.remove();
+  });
+  store.bannerStack = [];
+  store.bannerLastShowAt = 0;
+  clearTimeout(store.bannerWaitTimer);
+  syncBannerFlags();
 }
 
 // 一条播报收完，把等待展示的骰子和走子放出来
@@ -1509,7 +1612,7 @@ function openEnd() {
       ${S.hostId === store.me ? '<button class="btn primary" id="btn-rematch">开新一局</button>' : ''}
     </div>
   `);
-  $('#btn-rematch')?.addEventListener('click', () => { closeModal(); act({ type: 'restart' }); });
+  $('#btn-rematch')?.addEventListener('click', () => { closeModal(); resetBannerCursor(); act({ type: 'restart' }); });
 }
 
 // ────────────── toast ──────────────
