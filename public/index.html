@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>罗弗敦大富翁 · Lofoten Monopoly</title>
+<meta name="theme-color" content="#060b14" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a1524'/%3E%3Cpath d='M4 22l7-11 5 7 4-6 8 10z' fill='%234ce0b3'/%3E%3Ccircle cx='24' cy='8' r='2' fill='%23f0c04a'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/styles.css" />
+<script>
+  // 主题要在首帧之前定下来，避免深色闪一下再变浅
+  try {
+    var saved = localStorage.getItem('lofoten:theme');
+    if (saved !== 'light' && saved !== 'dark') {
+      saved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    document.documentElement.dataset.theme = saved;
+  } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+</script>
+</head>
+<body>
+<div class="aurora" aria-hidden="true">
+  <span class="a1"></span><span class="a2"></span><span class="a3"></span>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">⛰</span>
+    <span class="brand-text">LOFOTEN <i>MONOPOLY</i></span>
+  </div>
+  <div class="topbar-right">
+    <span id="conn" class="conn off"><i></i>连接中</span>
+    <button id="btn-theme" class="theme-btn" title="切换到浅色主题">
+      <span id="theme-icon">☾</span><span id="theme-label">浅色</span>
+    </button>
+    <button id="btn-copy" class="btn ghost tiny hidden">邀请链接</button>
+    <button id="btn-exit" class="btn ghost tiny hidden">退出</button>
+  </div>
+</header>
+
+<main id="app">
+
+  <!-- ══════════ 大厅 ══════════ -->
+  <section id="screen-lobby" class="screen">
+    <div class="lobby-hero">
+      <div class="hero-kicker">69°N · NORWEGIAN SEA</div>
+      <h1>罗弗敦<em>大富翁</em></h1>
+      <p class="hero-sub">在极光下的渔村，买下整座群岛</p>
+      <div class="hero-line"></div>
+    </div>
+
+    <div class="lobby-grid">
+      <div class="panel lobby-card">
+        <div class="panel-title">开始一局</div>
+        <label class="field">
+          <span>你的名字</span>
+          <div class="name-row">
+            <input id="name-input" maxlength="12" placeholder="渔夫阿林" autocomplete="nickname" />
+            <button id="btn-random-name" class="btn tiny name-dice" type="button" title="随机起一个罗弗敦的职业名字">🎲 随机</button>
+          </div>
+        </label>
+        <button id="btn-create" class="btn primary block">创建房间</button>
+        <button id="btn-solo" class="btn ghost block">单人对战 3 个机器人</button>
+        <p class="hint">创房后会得到 4 位房间码；想一个人玩，直接点上面的机器人开局。</p>
+      </div>
+
+      <div class="panel lobby-card">
+        <div class="panel-title">加入一局</div>
+        <label class="field">
+          <span>房间码</span>
+          <input id="code-input" maxlength="4" placeholder="ABCD" class="code-input" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="btn-join" class="btn block">加入房间</button>
+        <p class="hint">房间码不区分大小写。2–6 人开局。</p>
+      </div>
+    </div>
+
+    <div class="lobby-rules">
+      <div class="rule"><b>掷双骰</b><span>对子可再掷一次，连续三次对子进监狱</span></div>
+      <div class="rule"><b>买地收租</b><span>集齐同色地块，基础租金翻倍</span></div>
+      <div class="rule"><b>建房升值</b><span>4 栋房屋升级为酒店，租金飙升</span></div>
+      <div class="rule"><b>最后站立的领主</b><span>让对手破产，赢下整个群岛</span></div>
+    </div>
+  </section>
+
+  <!-- ══════════ 等待开局 ══════════ -->
+  <section id="screen-wait" class="screen hidden">
+    <div class="wait-wrap">
+      <div class="hero-kicker">WAITING ROOM</div>
+      <h2 class="wait-title">等人上岛</h2>
+      <div class="room-badge">
+        <span class="rb-label">房间码</span>
+        <strong id="wait-code">----</strong>
+        <button id="btn-copy2" class="btn ghost tiny">复制邀请链接</button>
+      </div>
+      <div id="wait-players" class="wait-players"></div>
+      <div class="bot-row hidden" id="bot-row">
+        <button id="btn-add-bot" class="btn ghost tiny">＋ 机器人</button>
+        <button id="btn-fill-bots" class="btn ghost tiny">补到 4 人</button>
+        <span class="bot-note">一个人也能开局试玩</span>
+      </div>
+      <div class="limit-row">
+        <span>对局长度</span>
+        <select id="limit-select">
+          <option value="40">40 回合 · 快速局</option>
+          <option value="80">80 回合 · 标准局</option>
+          <option value="120">120 回合 · 长局</option>
+          <option value="0">无上限 · 打到破产</option>
+        </select>
+      </div>
+      <div class="wait-foot">
+        <button id="btn-start" class="btn primary">开始游戏</button>
+        <span id="wait-tip" class="hint">至少需要 2 人，房主可以开始。</span>
+      </div>
+      <p class="wait-addr" id="wait-addr"></p>
+    </div>
+  </section>
+
+  <!-- ══════════ 游戏 ══════════ -->
+  <section id="screen-game" class="screen hidden">
+    <div class="game-grid">
+
+      <aside class="side side-left">
+        <div class="room-chip">
+          <span>房间</span>
+          <b id="room-code">----</b>
+          <button id="btn-copy3" class="icon-btn" title="复制邀请链接">⧉</button>
+        </div>
+        <div id="players" class="players"></div>
+
+        <!-- 局内聊天 -->
+        <div class="panel chat-panel">
+          <div class="panel-title chat-title">岛民频道</div>
+          <div id="chat-list" class="chat-list">
+            <div class="chat-empty">还没有人说话，先打个招呼吧。</div>
+          </div>
+          <form id="chat-form" class="chat-form" autocomplete="off">
+            <input id="chat-input" maxlength="60" placeholder="和大家说句话…" aria-label="聊天输入框" />
+            <button class="chat-send" type="submit" title="发送（Enter）" aria-label="发送">⏎</button>
+          </form>
+        </div>
+      </aside>
+
+      <div class="board-wrap">
+        <div id="board" class="board">
+          <div class="board-center" id="board-center">
+            <svg class="bc-mountains" viewBox="0 0 300 120" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="mg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#1b3350" />
+                  <stop offset="1" stop-color="#0a1524" />
+                </linearGradient>
+              </defs>
+              <path d="M0 118 L38 62 L58 84 L84 40 L110 78 L132 58 L158 96 L186 52 L214 88 L240 66 L268 100 L300 70 L300 120 L0 120 Z" fill="url(#mg)" opacity=".85"/>
+              <path d="M0 120 L0 104 L30 92 L64 106 L96 86 L128 104 L160 90 L196 108 L228 94 L262 110 L300 96 L300 120 Z" fill="#081220" opacity=".9"/>
+            </svg>
+            <svg class="bc-compass" viewBox="0 0 200 200" aria-hidden="true">
+              <circle cx="100" cy="100" r="94" fill="none" stroke="rgba(76,224,179,.10)" stroke-width="0.5" />
+              <circle cx="100" cy="100" r="74" fill="none" stroke="rgba(76,224,179,.07)" stroke-width="0.5" stroke-dasharray="2 7" />
+              <circle cx="100" cy="100" r="52" fill="none" stroke="rgba(155,140,245,.08)" stroke-width="0.5" />
+              <path d="M100 8 L100 18" stroke="rgba(76,224,179,.32)" stroke-width="1" />
+              <path d="M100 192 L100 182" stroke="rgba(230,238,247,.14)" stroke-width="1" />
+              <path d="M8 100 L18 100" stroke="rgba(230,238,247,.10)" stroke-width="1" />
+              <path d="M192 100 L182 100" stroke="rgba(230,238,247,.10)" stroke-width="1" />
+            </svg>
+            <div class="bc-brand">
+              <span class="bc-kicker">LOFOTEN · NORGE</span>
+              <span class="bc-title">罗弗敦<em>大富翁</em></span>
+            </div>
+            <!-- 银行库存：与左上角品牌区左右对称 -->
+            <div class="bc-bank" id="bank-panel">
+              <span class="bc-kicker">BANK · 银行库存</span>
+              <span class="bc-bank-row">
+                <span>房屋 <b id="bank-houses">32</b></span>
+                <i>·</i>
+                <span>酒店 <b id="bank-hotels">12</b></span>
+              </span>
+            </div>
+            <div class="bc-inner">
+              <div class="bc-dice" id="board-dice"></div>
+              <div class="bc-turn" id="board-turn">准备开局</div>
+              <div class="bc-hint" id="board-hint"></div>
+            </div>
+            <div class="bc-banner" id="turn-banner"></div>
+          </div>
+          <div class="bc-tokens" id="tokens"></div>
+        </div>
+      </div>
+
+      <aside class="side side-right">
+        <div class="panel action-panel">
+          <div class="panel-title" id="action-title">你的回合</div>
+          <div id="actions" class="actions"></div>
+        </div>
+        <div class="panel log-panel">
+          <div class="panel-title">岛上报事</div>
+          <div id="log" class="log"></div>
+        </div>
+      </aside>
+
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+<div id="modal-root"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

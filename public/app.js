@@ -1,0 +1,1468 @@
+// 罗弗敦大富翁 —— 前端
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+const store = {
+  board: [],
+  groups: {},
+  meta: {},
+  decks: { chance: [], chest: [] },
+  state: null,
+  me: null,
+  room: null,
+  token: null,
+  es: null,
+  cellEls: [],
+  tokenEls: new Map(),
+  viewPos: new Map(),
+  moveTimer: null,
+  diceBusyUntil: 0,
+  lastTurnKey: '',
+  turnKey: '',
+  turnAt: 0,
+  bannerTimer: null,
+  bannerUntil: 0,
+  bannerQueue: [],
+  bannerBusy: false,
+  bannerWaitTimer: null,
+  lastLogSeq: null,
+  lastAck: null,
+  moveSettleAt: 0,
+  lastDice: '',
+  endShown: false,
+  screen: 'lobby',
+};
+
+const money = (n) => 'kr ' + Number(n).toLocaleString('en-US');
+const fmt = (n) => Number(n).toLocaleString('en-US');
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ────────────── API ──────────────
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  let json = {};
+  try { json = await res.json(); } catch { /* ignore */ }
+  if (!res.ok) throw new Error(json.error || '网络异常');
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
+async function act(action) {
+  if (!store.room) return;
+  try {
+    await api('/api/action', { roomId: store.room, token: store.token, action });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// ────────────── 启动 ──────────────
+async function boot() {
+  const data = await (await fetch('/api/board')).json();
+  store.board = data.board;
+  store.groups = data.groups;
+  store.meta = data.meta;
+  store.decks = data.decks;
+  buildBoard();
+  bindUI();
+
+  const params = new URLSearchParams(location.search);
+  const roomId = (params.get('r') || '').toUpperCase();
+  const savedName = localStorage.getItem('lofoten:name') || '';
+  $('#name-input').value = savedName;
+
+  if (roomId) {
+    $('#code-input').value = roomId;
+    const tokenParam = params.get('t'); // 兼容从链接直接恢复身份
+    if (tokenParam) localStorage.setItem('lofoten:token:' + roomId, tokenParam);
+    const token = localStorage.getItem('lofoten:token:' + roomId);
+    if (token) {
+      try {
+        const r = await api('/api/join', { roomId, token, name: savedName });
+        enterRoom(r);
+        return;
+      } catch { /* 身份失效，走手动加入 */ }
+    }
+  }
+  showScreen('lobby');
+}
+
+function bindUI() {
+  $('#btn-create').addEventListener('click', createRoom);
+  $('#btn-solo').addEventListener('click', soloGame);
+  $('#btn-join').addEventListener('click', joinRoom);
+  $('#btn-random-name').addEventListener('click', randomName);
+  $('#chat-form').addEventListener('submit', sendChat);
+  $('#code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom(); });
+  $('#name-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') ($('#code-input').value ? joinRoom() : createRoom()); });
+  $('#btn-start').addEventListener('click', () => act({ type: 'start' }));
+  $('#limit-select').addEventListener('change', (e) => act({ type: 'setLimit', turnLimit: Number(e.target.value) }));
+  $('#btn-add-bot').addEventListener('click', () => act({ type: 'addBot' }));
+  $('#btn-fill-bots').addEventListener('click', fillBots);
+  $('#wait-players').addEventListener('click', (e) => {
+    const roll = e.target.closest('[data-roll-order]');
+    if (roll) { act({ type: 'rollOrder' }); return; }
+    const btn = e.target.closest('[data-remove-bot]');
+    if (btn) act({ type: 'removeBot', playerId: btn.dataset.removeBot });
+  });
+  // 点左侧玩家卡：看这名玩家名下的全部资产与手牌
+  $('#players').addEventListener('click', (e) => {
+    const card = e.target.closest('.pcard');
+    if (card?.dataset.pid) openAssets(card.dataset.pid);
+  });
+  [$('#btn-copy'), $('#btn-copy2'), $('#btn-copy3')].forEach((b) => b?.addEventListener('click', copyInvite));
+  $('#btn-exit').addEventListener('click', exitRoom);
+
+  $('#actions').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const type = btn.dataset.action;
+    const index = btn.dataset.index !== undefined ? Number(btn.dataset.index) : undefined;
+    if (type === 'openAssets') return openAssets();
+    if (type === 'openTrade') return openTrade();
+    if (type === 'openRule') return openRule();
+    if (type === 'openEnd') return openEnd();
+    if (type === 'restart') return act({ type: 'restart' });
+    if (type === 'respondTrade') return act({ type: 'respondTrade', accept: btn.dataset.accept === '1' });
+    act(index === undefined ? { type } : { type, index });
+  });
+
+  $('#modal-root').addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal-back') || e.target.dataset.close !== undefined) closeModal();
+  });
+
+  // 播报与走子都放完后回报服务端，机器人靠这个节拍继续行动
+  setInterval(maybeAck, 300);
+
+  $('#btn-theme').addEventListener('click', () => {
+    applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+  });
+  applyTheme(currentTheme()); // 同步图标与浏览器主题色
+}
+
+// ────────────── 主题 ──────────────
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme) {
+  const light = theme === 'light';
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  try { localStorage.setItem('lofoten:theme', light ? 'light' : 'dark'); } catch { /* 无痕模式 */ }
+  const icon = $('#theme-icon');
+  const label = $('#theme-label');
+  const btn = $('#btn-theme');
+  if (icon) icon.textContent = light ? '☀' : '☾';
+  if (label) label.textContent = light ? '深色' : '浅色';
+  if (btn) btn.title = light ? '切换到深色主题' : '切换到浅色主题';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', light ? '#eef3f9' : '#060b14');
+}
+
+// ────────────── 入场 ──────────────
+async function createRoom() {
+  const name = $('#name-input').value.trim();
+  if (!name) return toast('先给自己起个名字');
+  localStorage.setItem('lofoten:name', name);
+  try {
+    const r = await api('/api/create', { name });
+    enterRoom(r);
+  } catch (e) { toast(e.message); }
+}
+
+async function soloGame() {
+  const name = $('#name-input').value.trim();
+  if (!name) return toast('先给自己起个名字');
+  localStorage.setItem('lofoten:name', name);
+  try {
+    const r = await api('/api/create', { name });
+    for (let i = 0; i < 3; i++) {
+      await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'addBot' } });
+    }
+    await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'start' } });
+    enterRoom(r);
+  } catch (e) { toast(e.message); }
+}
+
+// 随机起名：名字池在服务端，会避开当前房间里已经用过的名字
+async function randomName() {
+  const btn = $('#btn-random-name');
+  const input = $('#name-input');
+  btn.disabled = true;
+  try {
+    const code = ($('#code-input').value || '').trim().toUpperCase();
+    const q = code.length === 4 ? `?room=${encodeURIComponent(code)}` : '';
+    const r = await (await fetch('/api/name' + q)).json();
+    if (!r.name) throw new Error('没有拿到名字');
+    input.value = r.name;
+    input.classList.remove('name-flash');
+    void input.offsetWidth;
+    input.classList.add('name-flash');
+    localStorage.setItem('lofoten:name', r.name);
+  } catch {
+    toast('随机起名失败，稍后再试');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function joinRoom() {
+  const name = $('#name-input').value.trim() || '旅人';
+  const roomId = ($('#code-input').value || '').trim().toUpperCase();
+  if (roomId.length !== 4) return toast('房间码是 4 位');
+  localStorage.setItem('lofoten:name', name);
+  try {
+    const r = await api('/api/join', { roomId, name });
+    enterRoom(r);
+  } catch (e) { toast(e.message); }
+}
+
+async function fillBots() {
+  const S = store.state;
+  if (!S) return;
+  const need = Math.max(0, 4 - S.players.length);
+  if (!need) return toast('已经够 4 人了');
+  for (let i = 0; i < need; i++) {
+    try {
+      await api('/api/action', { roomId: store.room, token: store.token, action: { type: 'addBot' } });
+    } catch (e) { toast(e.message); return; }
+  }
+}
+
+function enterRoom(r) {
+  store.room = r.roomId;
+  store.token = r.token;
+  store.me = r.playerId;
+  // 换房间：把播报队列和游标清干净，避免上家的播报串进来
+  store.bannerQueue = [];
+  store.bannerBusy = false;
+  store.bannerUntil = 0;
+  store.lastLogSeq = null;
+  store.lastAck = null;
+  store.lastTurnKey = '';
+  store.lastChatKey = null;
+  localStorage.setItem('lofoten:token:' + r.roomId, r.token);
+  history.replaceState(null, '', `?r=${r.roomId}`);
+  $('#btn-copy').classList.remove('hidden');
+  $('#btn-exit').classList.remove('hidden');
+  connect();
+}
+
+function connect() {
+  if (store.es) store.es.close();
+  const es = new EventSource(`/api/stream?room=${store.room}&token=${store.token}`);
+  store.es = es;
+  es.onopen = () => setConn(true);
+  es.onmessage = (ev) => {
+    store.state = JSON.parse(ev.data);
+    render();
+  };
+  es.onerror = () => setConn(false);
+}
+
+function setConn(ok) {
+  const el = $('#conn');
+  el.className = 'conn ' + (ok ? 'on' : 'off');
+  el.innerHTML = `<i></i>${ok ? '已连接' : '重连中'}`;
+}
+
+async function exitRoom() {
+  try { await api('/api/leave', { roomId: store.room, token: store.token }); } catch { /* ignore */ }
+  localStorage.removeItem('lofoten:token:' + store.room);
+  if (store.es) store.es.close();
+  location.href = location.pathname;
+}
+
+function copyInvite() {
+  const url = `${location.origin}${location.pathname}?r=${store.room}`;
+  const done = () => toast('邀请链接已复制，发给同 Wi-Fi 的朋友', true);
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
+  } else {
+    fallbackCopy(url, done);
+  }
+}
+function fallbackCopy(text, cb) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); cb(); } catch { toast('复制失败，手动分享地址栏链接'); }
+  ta.remove();
+}
+
+// ────────────── 渲染 ──────────────
+function showScreen(name) {
+  if (store.screen === name) return;
+  store.screen = name;
+  ['lobby', 'wait', 'game'].forEach((s) => $('#screen-' + s).classList.toggle('hidden', s !== name));
+}
+
+function render() {
+  const S = store.state;
+  if (!S) return;
+  if (S.phase === 'lobby') {
+    showScreen('wait');
+    renderWait();
+  } else {
+    showScreen('game');
+    renderGame();
+  }
+}
+
+// ⚀–⚅ 六个骰面（等待房掷骰定序用）
+const DIE_LAYOUTS = {
+  1: [[50, 50]],
+  2: [[26, 26], [74, 74]],
+  3: [[26, 26], [50, 50], [74, 74]],
+  4: [[26, 26], [74, 26], [26, 74], [74, 74]],
+  5: [[26, 26], [74, 26], [50, 50], [26, 74], [74, 74]],
+  6: [[26, 26], [74, 26], [26, 50], [74, 50], [26, 74], [74, 74]],
+};
+const pipsHTML = (v) => (DIE_LAYOUTS[v] || []).map(([x, y]) => `<i style="left:${x}%;top:${y}%"></i>`).join('');
+// 小号骰子：和棋盘中央的骰子同一套点数布局，只是尺寸缩到能放进卡片
+const miniDiceHTML = (vals) =>
+  `<span class="wp-dice">${vals.map((v) => `<span class="wp-die">${pipsHTML(v)}</span>`).join('')}</span>`;
+
+// 等待房里按「掷骰定序」的规则算出出手顺序（未掷的人排在最后）
+function projectedOrder(S) {
+  const sum = (p) => (p.orderRoll ? p.orderRoll[0] + p.orderRoll[1] : -1);
+  const high = (p) => (p.orderRoll ? Math.max(p.orderRoll[0], p.orderRoll[1]) : 0);
+  return [...S.players].sort((a, b) => sum(b) - sum(a) || high(b) - high(a) || a.seat - b.seat);
+}
+
+function renderWait() {
+  const S = store.state;
+  $('#wait-code').textContent = S.id;
+  const me = S.hostId === store.me;
+  const order = projectedOrder(S);
+  const rankOf = (id) => order.findIndex((p) => p.id === id) + 1;
+
+  $('#wait-players').innerHTML = S.players
+    .map((p) => {
+      const rolled = !!p.orderRoll;
+      const rk = rolled ? rankOf(p.id) : 0;
+      const right = rolled
+        ? `${miniDiceHTML(p.orderRoll)}<div class="wp-sum">${p.orderRoll[0] + p.orderRoll[1]} 点 · 第 ${rk} 位</div>`
+        : (p.id === store.me
+          ? '<button class="btn tiny wp-roll" data-roll-order="1">🎲 掷骰</button>'
+          : '<span class="wp-wait">待掷骰</span>');
+      return `
+      <div class="wait-player${p.isBot ? ' is-bot' : ''}${rolled ? ' rolled' : ''}${rk === 1 ? ' first' : ''}" style="--c:${p.color}">
+        <div class="wp-token" style="--c:${p.color}">${p.emoji}</div>
+        <div class="wp-body">
+          <div class="wp-name">${esc(p.name)}${p.id === store.me ? ' <span class="wp-tag">（你）</span>' : ''}${p.isBot ? ' <span class="wp-bot">机器人</span>' : ''}</div>
+          <div class="wp-tag">${p.id === S.hostId ? '房主' : p.isBot ? '自动托管' : '已就位'}</div>
+        </div>
+        <div class="wp-order">${right}</div>
+        ${p.isBot && me ? `<button class="wp-x" data-remove-bot="${p.id}" title="移除机器人">✕</button>` : ''}
+      </div>`;
+    })
+    .join('') + (S.players.length < 6 ? `
+      <div class="wait-player" style="--c:#2a3d55; opacity:.5">
+        <div class="wp-token" style="--c:#2a3d55">＋</div>
+        <div class="wp-body"><div class="wp-name">等待加入…</div><div class="wp-tag">最多 6 人</div></div>
+      </div>` : '');
+
+  const btn = $('#btn-start');
+  btn.classList.toggle('hidden', !me);
+  btn.disabled = S.players.length < 2;
+  $('#bot-row').classList.toggle('hidden', !me);
+  $('#btn-add-bot').disabled = S.players.length >= 6;
+  $('#btn-fill-bots').disabled = S.players.length >= 4;
+  const sel = $('#limit-select');
+  if (sel.value !== String(S.turnLimit ?? 80)) sel.value = String(S.turnLimit ?? 80);
+  sel.disabled = !me;
+
+  const unrolled = S.players.filter((p) => !p.orderRoll).length;
+  const rolledList = order.filter((p) => p.orderRoll).map((p) => p.name);
+  if (!me) {
+    $('#wait-tip').textContent = '等待房主开始游戏…';
+  } else if (S.players.length < 2) {
+    $('#wait-tip').textContent = '至少需要 2 名玩家——可以加机器人开局。';
+  } else if (unrolled > 0) {
+    $('#wait-tip').textContent = `还有 ${unrolled} 人没掷骰，掷完就知道谁先出手。`;
+  } else {
+    $('#wait-tip').textContent = `出手顺序：${rolledList.join(' → ')}`;
+  }
+  $('#wait-addr').textContent = location.origin + location.pathname + '?r=' + S.id;
+}
+
+function renderGame() {
+  const S = store.state;
+  // 开新一局（回合数归零）时棋子直接就位，不要倒着走一圈
+  if (store.lastTurnNo != null && S.turnNo < store.lastTurnNo) snapTokens();
+  store.lastTurnNo = S.turnNo;
+  $('#room-code').textContent = S.id;
+  renderPlayers();
+  renderBoardState();
+  renderActions();
+  renderCenter();
+  renderBanners();
+  renderLog();
+  renderTokens();
+  renderChat();
+  const bh = $('#bank-houses');
+  const bhh = $('#bank-hotels');
+  if (bh) bh.textContent = S.bank.houses;
+  if (bhh) bhh.textContent = S.bank.hotels;
+}
+
+// ────────────── 局内聊天 ──────────────
+// 只在消息列表真的变了才重绘，避免每次 SSE 推送都打断输入框与滚动位置
+function renderChat() {
+  const S = store.state;
+  const list = $('#chat-list');
+  if (!list) return;
+  const msgs = S.chat || [];
+  const key = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].id}` : '0';
+  if (store.lastChatKey === key) return;
+  store.lastChatKey = key;
+
+  if (!msgs.length) {
+    list.innerHTML = '<div class="chat-empty">还没有人说话，先打个招呼吧。</div>';
+    return;
+  }
+  // 用户往上翻看历史时不要强行拽回底部
+  const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 42;
+  list.innerHTML = msgs.map((m) => `
+    <div class="chat-msg${m.pid === store.me ? ' mine' : ''}">
+      <span class="chat-who" style="--c:${m.color || '#9fe8d4'}">${esc(m.name)}</span>
+      <span class="chat-text">${esc(m.text)}</span>
+    </div>`).join('');
+  if (nearBottom) list.scrollTop = list.scrollHeight;
+}
+
+async function sendChat(e) {
+  e?.preventDefault();
+  const input = $('#chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text || !store.room) return;
+  input.value = '';
+  try {
+    await api('/api/action', {
+      roomId: store.room,
+      token: store.token,
+      action: { type: 'chat', text },
+    });
+  } catch (err) {
+    input.value = text; // 发失败把话还给玩家
+    toast(err.message);
+  }
+}
+
+function myPlayer() {
+  return store.state?.players.find((p) => p.id === store.me) || null;
+}
+function playerById(id) {
+  return store.state?.players.find((p) => p.id === id) || null;
+}
+function isMyTurn() {
+  const S = store.state;
+  return S?.players[S.current]?.id === store.me;
+}
+
+function renderPlayers() {
+  const S = store.state;
+  $('#players').innerHTML = S.players.map((p) => {
+    const active = S.players[S.current]?.id === p.id && S.phase === 'playing';
+    const vouchers = (p.held || []).filter((c) => c.kind === 'rent').length;
+    return `
+      <div class="pcard ${active ? ' active' : ''} ${p.bankrupt ? 'bankrupt' : ''} ${p.connected ? '' : 'offline'} ${active && p.isBot ? 'thinking' : ''}"
+           data-pid="${p.id}" title="点击查看 ${esc(p.name)} 的资产" style="--c:${p.color}">
+        <div class="pav" style="--c:${p.color}">${p.emoji}</div>
+        <div class="pinfo">
+          <div class="pname">${esc(p.name)}${p.id === store.me ? '<span class="you">你</span>' : ''}${p.isBot ? '<span class="pbot">🤖</span>' : ''}${p.connected ? '' : ' <span style="color:#7f94ab;font-size:9px">离线</span>'}</div>
+          <div class="pcash">${money(p.cash)}</div>
+          <div class="pmeta">
+            <span>${p.props.length} 处地产</span>
+            ${p.cards ? `<span>🎫 ${p.cards}</span>` : ''}
+            ${vouchers ? `<span>🎟 ${vouchers}</span>` : ''}
+            ${p.inJail ? '<span class="jail">🔒 狱中</span>' : ''}
+            ${p.bankrupt ? '<span class="jail">已出局</span>' : ''}
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ────────────── 棋盘 ──────────────
+function coord(i) {
+  if (i === 0) return [11, 11];
+  if (i < 10) return [11, 11 - i];
+  if (i === 10) return [11, 1];
+  if (i < 20) return [11 - (i - 10), 1];
+  if (i === 20) return [1, 1];
+  if (i < 30) return [1, 1 + (i - 20)];
+  if (i === 30) return [1, 11];
+  return [1 + (i - 30), 11];
+}
+function sideClass(i) {
+  if (i <= 10) return 'side-bottom';
+  if (i <= 20) return 'side-left';
+  if (i <= 30) return 'side-top';
+  return 'side-right';
+}
+
+// 6 字以上（都是渡口名）在末两字前断行，避免出现 4+1 的孤字
+function cellLabel(name) {
+  if (name.length >= 6) return `${esc(name.slice(0, name.length - 2))}<br>${esc(name.slice(-2))}`;
+  return esc(name);
+}
+
+// 只有四个角和两种卡牌格保留 emoji 图标，其余格子只用文字，保持整圈统一
+const CELL_ICON_TYPES = new Set(['go', 'jail', 'parking', 'gotojail', 'chance', 'chest']);
+
+function cellContent(c) {
+  const icon = CELL_ICON_TYPES.has(c.type) ? `<div class="cell-icon">${c.icon}</div>` : '';
+  // 挪威文原名：只出现在棋盘格上，不折行，过长省略
+  const en = c.en ? `<div class="cell-en">${esc(c.en)}</div>` : '';
+  if (c.type === 'prop') {
+    return `<div class="cell-main">
+        <div class="cell-name">${cellLabel(c.name)}</div>
+        ${en}
+        <div class="cell-price">${c.price}</div>
+      </div>`;
+  }
+  if (c.type === 'ferry' || c.type === 'util') {
+    return `<div class="cell-main">
+        <div class="cell-name">${cellLabel(c.name)}</div>
+        ${en}
+        <div class="cell-price">${c.price}</div>
+      </div>`;
+  }
+  if (c.type === 'tax') {
+    return `<div class="cell-main">
+        <div class="cell-name">${cellLabel(c.name)}</div>
+        ${en}
+        <div class="cell-price">−${c.amount}</div>
+      </div>`;
+  }
+  return `<div class="cell-main">
+      ${icon}
+      <div class="cell-name">${cellLabel(c.name)}</div>
+      ${en}
+    </div>`;
+}
+
+function buildBoard() {
+  const board = $('#board');
+  $$('.cell', board).forEach((n) => n.remove());
+  const frag = document.createDocumentFragment();
+  store.cellEls = [];
+  store.board.forEach((c, i) => {
+    const [row, col] = coord(i);
+    const el = document.createElement('div');
+    const corner = ['go', 'jail', 'parking', 'gotojail'].includes(c.type);
+    el.className = `cell ${sideClass(i)}${corner ? ' corner' : ''}${['prop', 'ferry', 'util'].includes(c.type) ? '' : ' special'}`;
+    el.style.gridRow = String(row);
+    el.style.gridColumn = String(col);
+    el.dataset.i = String(i);
+    let html = '';
+    if (c.type === 'prop') html += `<div class="bar" style="--c:${store.groups[c.group].color}"></div>`;
+    html += cellContent(c);
+    html += '<div class="cell-houses"></div><div class="cell-mark" style="display:none"></div>';
+    el.innerHTML = html;
+    el.addEventListener('click', () => openProperty(i));
+    frag.appendChild(el);
+    store.cellEls[i] = el;
+  });
+  board.appendChild(frag);
+}
+
+function renderBoardState() {
+  const S = store.state;
+  store.board.forEach((c, i) => {
+    const el = store.cellEls[i];
+    if (!el) return;
+    const st = S.cells[i];
+    const owner = st.owner ? playerById(st.owner) : null;
+    el.classList.toggle('owned', !!owner);
+    el.classList.toggle('mortgaged', !!st.mortgaged);
+    if (owner) {
+      el.style.setProperty('--own', owner.color);
+    } else {
+      el.style.removeProperty('--own');
+    }
+    const mark = el.querySelector('.cell-mark');
+    if (mark) {
+      mark.style.display = owner ? 'block' : 'none';
+      if (owner) mark.style.background = owner.color;
+    }
+    const houses = el.querySelector('.cell-houses');
+    if (houses) {
+      if (st.houses === 5) houses.innerHTML = '<span class="hotel"></span>';
+      else if (st.houses > 0) houses.innerHTML = '<span class="house"></span>'.repeat(st.houses);
+      else houses.innerHTML = '';
+    }
+  });
+}
+
+// 棋子：等骰子动画结束后再逐格移动，避免"骰子还在转，棋子已经飞过去"
+// 棋子放在棋盘层（#tokens）里，位置算到每格左上角，靠 left/top 过渡做连贯滑行
+const TOKEN_STEP_MS = 108;
+
+function renderTokens() {
+  const S = store.state;
+  const layer = $('#tokens');
+  if (!S || !layer) return;
+
+  S.players.forEach((p) => {
+    let el = store.tokenEls.get(p.id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'token';
+      el.dataset.pid = p.id;
+      layer.appendChild(el);
+      store.tokenEls.set(p.id, el);
+      store.viewPos.set(p.id, p.pos); // 首次出现直接就位，不做补间
+    }
+    el.textContent = p.emoji;
+    el.style.setProperty('--c', p.color);
+    el.classList.toggle('me', p.id === store.me);
+    el.classList.toggle('dead', !!p.bankrupt);
+    el.title = `${p.name} · ${money(p.cash)}`;
+    if (p.bankrupt) store.viewPos.set(p.id, p.pos);
+  });
+
+  paintTokens();
+
+  if (pendingMove() && !store.moveTimer && !store.bannerBusy) {
+    // 播报正在放就先等等，等它收完再走子，两件事不叠在一起
+    const wait = Math.max(0, store.diceBusyUntil - Date.now());
+    store.moveTimer = setTimeout(stepTokens, wait);
+  }
+}
+
+function pendingMove() {
+  const S = store.state;
+  return S.players.some((p) => !p.bankrupt && store.viewPos.has(p.id) && store.viewPos.get(p.id) !== p.pos);
+}
+
+function stepTokens() {
+  store.moveTimer = null;
+  const S = store.state;
+  if (!S) return;
+  let moved = false;
+  S.players.forEach((p) => {
+    const cur = store.viewPos.get(p.id);
+    if (cur === undefined || cur === p.pos) return;
+    const fwd = (p.pos - cur + 40) % 40;
+    const back = (cur - p.pos + 40) % 40;
+    // 后退类卡牌（≤6 格）往回走，其余一律顺时针前进
+    const dir = back > 0 && back < fwd && back <= 6 ? -1 : 1;
+    store.viewPos.set(p.id, (cur + dir + 40) % 40);
+    moved = true;
+  });
+  if (moved) {
+    paintTokens();
+    store.moveTimer = setTimeout(stepTokens, TOKEN_STEP_MS);
+  } else {
+    // 走完了，留一点过渡时间再放播报，避免"人还没站稳就开始播下一条"
+    store.moveSettleAt = Date.now() + 220;
+    renderActions(); // 走子期间禁用的按钮，落地后恢复
+    clearTimeout(store.bannerWaitTimer);
+    store.bannerWaitTimer = setTimeout(pumpBanner, 260);
+  }
+}
+
+// 立即就位：重开一局、重连等场景不做补间
+function snapTokens() {
+  const S = store.state;
+  if (!S) return;
+  clearTimeout(store.moveTimer);
+  store.moveTimer = null;
+  store.moveSettleAt = 0;
+  S.players.forEach((p) => store.viewPos.set(p.id, p.pos));
+  paintTokens();
+}
+
+// 每格左上角起手：第一颗贴角，第二颗排在它右边，依此类推
+const CELL_PCT = 100 / 11;
+function paintTokens() {
+  const S = store.state;
+  const board = $('#board');
+  if (!S || !board) return;
+  const bw = board.clientWidth || 1;
+  const sample = store.tokenEls.values().next().value;
+  const tw = sample ? sample.offsetWidth || 16 : 16; // 棋子直径（px），跟随 CSS clamp
+  const tok = (tw / bw) * 100;                        // 转成棋盘百分比
+  const gap = tok * 0.16;
+  const inset = tok * 0.16;
+
+  const groups = new Map();
+  S.players.forEach((p) => {
+    if (p.bankrupt) return;
+    const pos = store.viewPos.get(p.id) ?? p.pos;
+    if (!groups.has(pos)) groups.set(pos, []);
+    groups.get(pos).push(p);
+  });
+
+  groups.forEach((list, pos) => {
+    const [row, col] = coord(pos);
+    // 每格左上角起手：色条也压不住，直接贴角排
+    const x0 = (col - 1) * CELL_PCT + inset + tok / 2;
+    const y0 = (row - 1) * CELL_PCT + inset + tok / 2;
+    // 靠右边缘时排不下就折到下一行，保证棋子不会被裁出棋盘
+    const perRow = Math.max(1, Math.floor((100 - (x0 - tok / 2)) / (tok + gap)));
+
+    list.forEach((p, k) => {
+      const el = store.tokenEls.get(p.id);
+      if (!el) return;
+      const kk = k % perRow;
+      const rr = Math.floor(k / perRow);
+      const x = x0 + kk * (tok + gap);
+      const y = y0 + rr * (tok + gap);
+      el.style.left = Math.min(100 - tok / 2, x).toFixed(3) + '%';
+      el.style.top = Math.min(100 - tok / 2, y).toFixed(3) + '%';
+    });
+  });
+
+  // 已经不在房间里的玩家，把遗留棋子收掉
+  store.tokenEls.forEach((el, pid) => {
+    if (!S.players.some((p) => p.id === pid)) {
+      el.remove();
+      store.tokenEls.delete(pid);
+      store.viewPos.delete(pid);
+    }
+  });
+}
+
+// ────────────── 中央与骰子 ──────────────
+function diceHTML(v) {
+  return `<div class="die">${pipsHTML(v)}</div>`;
+}
+
+function renderCenter() {
+  const S = store.state;
+  const [d1, d2] = S.dice || [0, 0];
+  const key = `${d1}-${d2}-${S.players[S.current]?.pos ?? 0}`;
+  const diceKey = key;
+  const box = $('#board-dice');
+  if (store.lastDice !== diceKey) {
+    // 未掷骰时显示半透明骰子占位，避免出现两块纯白方块
+    box.classList.toggle('idle', !d1 || !d2);
+    box.innerHTML = diceHTML(d1 || 5) + diceHTML(d2 || 2);
+    if (d1 && d2) {
+      store.diceBusyUntil = Date.now() + 660; // 棋子等骰子停稳再走
+      $$('.die', box).forEach((d) => {
+        d.classList.add('rolling');
+        setTimeout(() => d.classList.remove('rolling'), 550);
+      });
+    }
+    store.lastDice = diceKey;
+  }
+
+  const p = S.players[S.current];
+  const me = p?.id === store.me;
+  // 记录本回合的触发时刻，中央那行“谁的回合”后面带上时间
+  const turnKey = `${S.turnNo}-${p?.id || ''}`;
+  if (store.turnKey !== turnKey) {
+    store.turnKey = turnKey;
+    store.turnAt = Date.now();
+  }
+  const clock = new Date(store.turnAt || Date.now())
+    .toLocaleTimeString('zh-CN', { hour12: false })
+    .slice(0, 5);
+
+  let turnText = '—';
+  let hint = '';
+  if (S.phase === 'ended') {
+    const w = playerById(S.winnerId);
+    turnText = '对局结束';
+    hint = w ? `${w.name} 赢得了罗弗敦` : '';
+  } else if (p) {
+    turnText = me ? '你的回合' : `${p.name} 的回合`;
+    if (S.pending?.type === 'buy') hint = me ? '决定是否买下这块地' : (p.isBot ? '机器人正在考虑…' : '等待对方决定…');
+    else if (S.pending?.type === 'jail') hint = me ? '想办法出狱' : '对方在狱中';
+    else if (S.canRoll) hint = me ? '掷骰子，出发' : (p.isBot ? '机器人正在掷骰…' : '等待掷骰…');
+    else hint = me ? '可以结束回合了' : (p.isBot ? '机器人正在行动…' : '等待操作…');
+  }
+  $('#board-turn').innerHTML =
+    `${esc(turnText)}` + (S.phase === 'ended' ? '' : `<span class="turn-clock">${clock}</span>`);
+  $('#board-hint').textContent = hint;
+}
+
+// ────────────── 棋盘中央大屏播报 ──────────────
+// 所有播报排成一条队列，一次只放一条：棋子还在走、上一条还没收完，
+// 下一条就绝不会插进来，避免"这边还在走子、那边已经轮到下一家"。
+const BANNER_TURN_MS = 1500;
+const BANNER_OUT_MS = 300;
+// 这两类不单独播报：掷骰由骰子动画代替，换人由回合播报代替
+const SILENT_KINDS = new Set(['roll', 'turn']);
+const EVENT_LABEL = {
+  money: '收支',
+  rent: '租金',
+  buy: '成交',
+  build: '建造',
+  card: '卡牌',
+  jail: '监狱',
+  trade: '交易',
+  bad: '出局',
+  win: '终局',
+  sys: '岛上报事',
+};
+
+function renderBanners() {
+  const S = store.state;
+  if (!S) return;
+  detectTurnBanner(S);
+  detectLogBanners(S);
+  pumpBanner();
+}
+
+// 回合播报：每次换人都播，全场可见
+function detectTurnBanner(S) {
+  if (S.phase !== 'playing') return;
+  const p = S.players[S.current];
+  if (!p) return;
+  const key = `${S.turnNo}-${p.id}`;
+  if (store.lastTurnKey === key) return;
+  store.lastTurnKey = key;
+
+  const clock = new Date(store.turnAt || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+  queueBanner({
+    type: 'turn',
+    ms: BANNER_TURN_MS,
+    color: p.color,
+    html: `
+      <div class="tb-kicker">第 ${S.turnNo}${S.turnLimit ? ' / ' + S.turnLimit : ''} 回合</div>
+      <div class="tb-token">${p.emoji}</div>
+      <div class="tb-name">${esc(p.name)}</div>
+      <div class="tb-time">${clock} · 开始行动</div>
+      <div class="tb-sub">${p.id === store.me ? '轮到你出手' : '轮到 TA 出手'}</div>`,
+  });
+}
+
+// 事件播报：收租、扣钱、买地、建房、抽卡、进出监狱……都单独播一条
+function detectLogBanners(S) {
+  const log = S.log || [];
+  const last = log[log.length - 1];
+  if (!last) return;
+  if (store.lastLogSeq == null) {
+    store.lastLogSeq = last.seq || 0; // 刚进房间，不回放历史
+    return;
+  }
+  if ((last.seq || 0) <= store.lastLogSeq) return;
+
+  const fresh = log.filter((l) => (l.seq || 0) > store.lastLogSeq);
+  store.lastLogSeq = last.seq;
+  fresh.forEach((l) => {
+    if (l.quiet) return; // 与金额播报重复的描述句，只在侧栏日志里出现
+    if (SILENT_KINDS.has(l.kind)) return;
+    const actor = S.players.find((p) => l.text.startsWith(p.name));
+    const delta = l.delta || 0;
+    const chip = delta
+      ? `<div class="tb-delta ${delta > 0 ? 'gain' : 'loss'}">${delta > 0 ? '+' : '−'}kr ${fmt(Math.abs(delta))}</div>`
+      : '';
+    queueBanner({
+      type: 'event',
+      // 文案越长，留的阅读时间越久
+      ms: Math.min(2050, 1150 + l.text.length * 18),
+      color: l.kind === 'win' ? '#ffd479' : actor?.color || '#4ce0b3',
+      html: `
+        <div class="tb-kicker">${actor ? `<i class="tb-e-dot" style="--c:${actor.color}"></i>` : ''}${EVENT_LABEL[l.kind] || '岛上报事'}</div>
+        <div class="tb-text">${esc(l.text)}</div>
+        ${chip}`,
+    });
+  });
+}
+
+function queueBanner(item) {
+  store.bannerQueue.push(item);
+  if (store.bannerQueue.length > 10) store.bannerQueue.shift();
+  pumpBanner();
+}
+
+// 棋子正在走（或刚落地还没停稳）时，任何播报都要排队等
+function tokensSettling() {
+  return pendingMove() || !!store.moveTimer || Date.now() < store.moveSettleAt;
+}
+
+function pumpBanner() {
+  if (store.bannerBusy || !store.bannerQueue.length) return;
+  if (tokensSettling()) {
+    clearTimeout(store.bannerWaitTimer);
+    store.bannerWaitTimer = setTimeout(pumpBanner, 130);
+    return;
+  }
+  showBanner(store.bannerQueue.shift());
+}
+
+function showBanner(item) {
+  const el = $('#turn-banner');
+  store.bannerBusy = true;
+  clearTimeout(store.bannerTimer);
+  el.className = `bc-banner ${item.type}`;
+  el.style.setProperty('--c', item.color);
+  el.innerHTML = item.html;
+  void el.offsetWidth; // 先落一帧，让淡入动画重新起跑
+  el.classList.add('show');
+
+  // 播报期间锁住操作，等这一条放完才轮到下一个行为
+  store.bannerUntil = Date.now() + item.ms;
+  renderActions();
+
+  store.bannerTimer = setTimeout(() => {
+    el.classList.add('out');
+    store.bannerUntil = 0;
+    store.bannerTimer = setTimeout(() => {
+      el.classList.remove('show', 'out');
+      store.bannerBusy = false;
+      renderActions();
+      flushVisuals(); // 被播报压住的掷骰 / 走子，现在接着放
+      pumpBanner();   // 再放下一条（会等走子停稳）
+    }, BANNER_OUT_MS);
+  }, item.ms);
+}
+
+// 一条播报收完，把等待展示的骰子和走子放出来
+function flushVisuals() {
+  if (!store.state) return;
+  renderCenter();
+  renderTokens();
+}
+
+// 画面彻底安静了（没播报、没走子）才回执；服务端据此放机器人继续走
+function maybeAck() {
+  const S = store.state;
+  if (!S || S.phase !== 'playing' || !store.room) return;
+  if (store.bannerBusy || store.bannerQueue.length || tokensSettling()) return;
+  if (Date.now() < store.bannerUntil) return;
+  if (store.lastAck === S.version) return;
+  const version = S.version;
+  api('/api/ack', { roomId: store.room, token: store.token, version })
+    .then(() => { store.lastAck = version; })
+    .catch(() => { /* 下个轮次再回执 */ });
+}
+
+// ────────────── 操作面板 ──────────────
+function renderActions() {
+  const S = store.state;
+  const me = myPlayer();
+  const p = S.players[S.current];
+  const myTurn = p?.id === store.me;
+  const box = $('#actions');
+  let h = '';
+
+  if (p) {
+    h += `<div class="turn-strip" style="--c:${p.color}">
+      <div class="ts-token" style="--c:${p.color}">${p.emoji}</div>
+      <div>
+        <div class="ts-name">${esc(p.name)}${myTurn ? ' · 你' : ''}</div>
+        <div class="ts-sub">${S.phase === 'ended' ? '对局结束' : `第 ${S.turnNo}${S.turnLimit ? ' / ' + S.turnLimit : ''} 回合`}</div>
+      </div>
+    </div>`;
+  }
+
+  if (myTurn && S.phase === 'playing') {
+    const near = nearSets(me);
+    if (near.length) {
+      h += `<div class="near-set">差 1 块集齐：${near.map((n) => `<b style="color:${n.color}">${esc(n.name)}</b>`).join('、')} · 试试交易</div>`;
+    }
+  }
+
+  if (S.phase === 'ended') {
+    const w = playerById(S.winnerId);
+    h += `<div class="decision">
+      <div class="d-title">${w ? `🏆 ${esc(w.name)} 胜出` : '对局结束'}</div>
+      <div class="d-sub">群岛的租金帝国已经易主。</div>
+      <div class="d-row"><button class="btn primary" data-action="openEnd">查看结算</button></div>
+    </div>`;
+    if (S.hostId === store.me) {
+      h += `<button class="btn" data-action="restart">开新一局</button>`;
+    }
+    box.innerHTML = h;
+    if (!store.endShown) { store.endShown = true; setTimeout(openEnd, 320); }
+    return;
+  }
+
+  // 待决策：买地
+  if (S.pending?.type === 'buy') {
+    const idx = S.pending.index;
+    const c = store.board[idx];
+    if (myTurn) {
+      h += `<div class="decision">
+        <div class="d-title">${c.icon} ${esc(c.name)}</div>
+        <div class="d-sub">kr ${c.price} · 租金 kr ${c.rent ? c.rent[0] : '—'}${c.type === 'prop' ? `（成套 ×2）` : ''}<br>你手上有 ${money(me.cash)}</div>
+        <div class="d-row">
+          <button class="btn primary" data-action="buy" ${me.cash < c.price ? 'disabled' : ''}>买下</button>
+          <button class="btn ghost" data-action="pass">放弃</button>
+        </div>
+      </div>`;
+    } else {
+      h += `<div class="decision"><div class="d-title">等待 ${esc(p.name)}</div><div class="d-sub">${p.isBot ? `🤖 机器人正在考虑是否买下「${esc(c.name)}」。` : `对方正在考虑是否买下「${esc(c.name)}」。`}</div></div>`;
+    }
+  }
+
+  // 待决策：监狱
+  if (S.pending?.type === 'jail') {
+    if (myTurn) {
+      h += `<div class="decision jail-decision">
+        <div class="d-title">🔒 你在监狱</div>
+        <div class="d-sub">支付 kr ${store.meta.JAIL_FINE} 保释，或掷出对子脱身（最多 3 次）。</div>
+        <div class="d-row"><button class="btn primary" data-action="jailPay">付保释金</button>
+        <button class="btn" data-action="jailRoll">掷骰求对子</button></div>
+        ${me.cards ? `<div class="d-row" style="margin-top:7px"><button class="btn ghost" data-action="jailCard">用免费渡轮票（${me.cards}）</button></div>` : ''}
+      </div>`;
+    } else {
+      h += `<div class="decision jail-decision"><div class="d-title">等待 ${esc(p.name)}</div><div class="d-sub">${p.isBot ? '🤖 机器人正在狱中想办法。' : '对方正在狱中想办法。'}</div></div>`;
+    }
+  }
+
+  // 常规操作
+  if (!S.pending) {
+    if (myTurn) {
+      if (S.canRoll) {
+        h += `<button class="btn primary block" data-action="roll">🎲 掷骰子</button>`;
+      } else {
+        h += `<button class="btn primary block" data-action="endTurn">结束回合 →</button>`;
+      }
+      h += `<div style="display:flex;gap:8px">
+        <button class="btn ghost" style="flex:1" data-action="openAssets">我的资产</button>
+        <button class="btn ghost" style="flex:1" data-action="openTrade">交易</button>
+      </div>`;
+    } else {
+      h += `<div class="decision"><div class="d-title">等待 ${esc(p?.name || '')}</div><div class="d-sub">${p?.isBot ? '🤖 机器人正在思考…' : '轮到对方行动。可以先看看对手的地产。'}</div></div>`;
+    }
+  }
+
+  // 收到的交易请求
+  if (S.trade && S.trade.to === store.me) {
+    h += tradeOfferCard(S.trade, true);
+  } else if (S.trade && S.trade.from === store.me) {
+    h += tradeOfferCard(S.trade, false);
+  }
+
+  box.innerHTML = h;
+  // 掷骰是「回合之间」的动作，要等播报和走子都放完；
+  // 买地、放弃、结束回合这些「回合之内」的操作不等播报，只等自己的棋子落地
+  const moving = tokensSettling();
+  const waitDice = Date.now() < store.bannerUntil || store.bannerBusy
+    || store.bannerQueue.length > 0 || moving;
+  box.classList.toggle('locked', waitDice);
+  if (waitDice) {
+    $$('button[data-action="roll"], button[data-action="jailRoll"]', box).forEach((b) => { b.disabled = true; });
+  }
+  if (moving) {
+    $$('button[data-action]', box).forEach((b) => { b.disabled = true; });
+  }
+}
+
+function tradeOfferCard(t, canAnswer) {
+  const giveNames = t.give.map((i) => store.board[i].name).join('、');
+  const getNames = t.get.map((i) => store.board[i].name).join('、');
+  return `<div class="trade-offer">
+    <div class="to-title">${canAnswer ? '收到交易请求' : '交易等待回应'}</div>
+    <div class="to-body">
+      ${esc(t.fromName)} 用 ${[giveNames, t.giveCash ? money(t.giveCash) : ''].filter(Boolean).join(' + ') || '（无）'}
+      换 ${esc(t.toName)} 的 ${[getNames, t.getCash ? money(t.getCash) : ''].filter(Boolean).join(' + ') || '（无）'}
+    </div>
+    ${canAnswer ? `<div class="d-row">
+      <button class="btn primary" data-action="respondTrade" data-accept="1">接受</button>
+      <button class="btn ghost" data-action="respondTrade" data-accept="0">拒绝</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function renderLog() {
+  const S = store.state;
+  const box = $('#log');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.innerHTML = S.log
+    .map((l) => {
+      const d = l.delta || 0;
+      const chip = d
+        ? `<span class="log-delta ${d > 0 ? 'gain' : 'loss'}">${d > 0 ? '+' : '−'}kr ${fmt(Math.abs(d))}</span>`
+        : '';
+      const tone = d > 0 ? ' gain' : d < 0 ? ' loss' : '';
+      return `<div class="log-item ${l.kind}${tone}"><span class="log-text">${esc(l.text)}</span>${chip}</div>`;
+    })
+    .join('');
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ────────────── 弹窗：地产 ──────────────
+function openModal(html, opts = {}) {
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">${html}</div></div>`;
+}
+function closeModal() {
+  $('#modal-root').innerHTML = '';
+}
+
+function openProperty(i) {
+  const c = store.board[i];
+  const S = store.state;
+  if (!S) return;
+  const st = S.cells[i];
+  const owner = st.owner ? playerById(st.owner) : null;
+  const myTurn = isMyTurn();
+  const me = myPlayer();
+  const group = c.group ? store.groups[c.group] : null;
+  const color = group ? group.color : c.type === 'ferry' ? '#7fa7c9' : c.type === 'util' ? '#8fd9c0' : '#26384e';
+
+  let body = '';
+  if (owner) {
+    body += `<div class="owner-line" style="--c:${owner.color}">
+      <span class="owner-dot"></span>业主：<b>${esc(owner.name)}</b>${st.mortgaged ? ' · 抵押中' : ''}
+    </div>`;
+  } else if (['prop', 'ferry', 'util'].includes(c.type)) {
+    body += `<div class="owner-line"><span class="owner-dot" style="--c:#4a5f77"></span>尚未售出</div>`;
+  }
+
+  if (c.type === 'prop') {
+    const owns = owner && store.board.filter((x) => x.group === c.group).every((x) => {
+      const idx = store.board.indexOf(x);
+      return S.cells[idx].owner === owner.id;
+    });
+    const rentLabels = ['空地', '成套空地（×2）', '1 栋房屋', '2 栋房屋', '3 栋房屋', '4 栋房屋', '酒店'];
+    body += `<table class="rent-table">`;
+    body += `<tr class="${st.houses === 0 && !owns ? 'hi' : ''}"><td>${rentLabels[0]}</td><td>kr ${c.rent[0]}</td></tr>`;
+    body += `<tr class="${st.houses === 0 && owns ? 'hi' : ''}"><td>${rentLabels[1]}</td><td>kr ${c.rent[0] * 2}</td></tr>`;
+    for (let hIdx = 1; hIdx <= 5; hIdx++) {
+      body += `<tr class="${st.houses === hIdx ? 'hi' : ''}"><td>${rentLabels[hIdx + 1]}</td><td>kr ${c.rent[hIdx]}</td></tr>`;
+    }
+    body += `</table>`;
+    body += `<div style="margin-top:12px">
+      <div class="kv"><span>地价</span><b>${money(c.price)}</b></div>
+      <div class="kv"><span>每栋房屋 / 酒店</span><b>${money(c.houseCost)}</b></div>
+      <div class="kv"><span>抵押价</span><b>${money(Math.floor(c.price / 2))}</b></div>
+      <div class="kv"><span>赎回价</span><b>${money(Math.ceil(c.price / 2 * 1.1))}</b></div>
+    </div>`;
+  } else if (c.type === 'ferry') {
+    body += `<div class="kv"><span>票价</span><b>${money(c.price)}</b></div>`;
+    c.rent.forEach((r, idx) => {
+      body += `<div class="kv"><span>持有 ${idx + 1} 座渡口</span><b>kr ${r}</b></div>`;
+    });
+  } else if (c.type === 'util') {
+    body += `<div class="kv"><span>价格</span><b>${money(c.price)}</b></div>
+      <div class="kv"><span>持有 1 处</span><b>骰子点数 × 4</b></div>
+      <div class="kv"><span>持有 2 处</span><b>骰子点数 × 10</b></div>`;
+  } else {
+    const desc = {
+      go: '经过或停留领取 kr 200。',
+      jail: '探访监狱，不受影响。',
+      parking: '免费歇脚，抬头看一会儿极光。',
+      gotojail: '非法捕鳕鱼被当场抓获，直接进监狱。',
+      tax: `向银行缴纳 ${money(c.amount)}。`,
+      chance: '抽一张极光卡，可能是惊喜，也可能是惊吓。',
+      chest: '抽一张命运卡，岛上的日常。',
+    }[c.type] || '';
+    body += `<p class="hint" style="margin-top:0">${desc}</p>`;
+    if (c.type === 'chance' || c.type === 'chest') {
+      const deck = c.type === 'chance' ? store.decks.chance : store.decks.chest;
+      body += `<div style="margin-top:10px;display:flex;flex-direction:column;gap:5px">` +
+        deck.map((d) => `<div style="font-size:11.5px;color:#8ea4ba"><b style="color:#c3b6ff">${esc(d.title)}</b> · ${esc(d.text)}</div>`).join('') +
+        `</div>`;
+    }
+  }
+
+  let foot = `<button class="btn ghost" data-close="1">关闭</button>`;
+  if (owner?.id === store.me && myTurn && S.phase === 'playing') {
+    if (c.type === 'prop') {
+      if (st.houses < 5) foot = `<button class="btn primary" data-build="${i}">${st.houses === 4 ? '升级酒店' : '建房'} · ${money(c.houseCost)}</button>` + foot;
+      if (st.houses > 0) foot = `<button class="btn ghost" data-sell="${i}">拆房 +${money(Math.floor(c.houseCost / 2))}</button>` + foot;
+    }
+    if (!st.mortgaged && (c.type !== 'prop' || !hasBuildings(c.group, st.owner))) {
+      foot = `<button class="btn ghost" data-mortgage="${i}">抵押 +${money(Math.floor(c.price / 2))}</button>` + foot;
+    } else if (st.mortgaged) {
+      foot = `<button class="btn ghost" data-unmortgage="${i}">赎回 · ${money(Math.ceil(c.price / 2 * 1.1))}</button>` + foot;
+    }
+  }
+
+  openModal(`
+    <div class="modal-head">
+      <div class="mh-bar" style="--c:${color}"></div>
+      <div>
+        <h3>${c.icon || ''} ${esc(c.name)}</h3>
+        <div class="mh-sub">${esc(c.en || '')}${group ? ' · ' + group.name : ''}</div>
+      </div>
+      <button class="modal-close" data-close="1">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-foot">${foot}</div>
+  `);
+
+  const root = $('#modal-root');
+  root.querySelector('[data-build]')?.addEventListener('click', () => { closeModal(); act({ type: 'build', index: i }); });
+  root.querySelector('[data-sell]')?.addEventListener('click', () => { closeModal(); act({ type: 'sellHouse', index: i }); });
+  root.querySelector('[data-mortgage]')?.addEventListener('click', () => { closeModal(); act({ type: 'mortgage', index: i }); });
+  root.querySelector('[data-unmortgage]')?.addEventListener('click', () => { closeModal(); act({ type: 'unmortgage', index: i }); });
+}
+
+function hasBuildings(group, ownerId) {
+  const S = store.state;
+  return store.board.some((c, i) => c.group === group && S.cells[i].owner === ownerId && S.cells[i].houses > 0);
+}
+
+// 只差一块就成套的色组
+function nearSets(p) {
+  if (!p || !store.state) return [];
+  const out = [];
+  for (const [g, meta] of Object.entries(store.groups)) {
+    const cells = store.board.map((c, i) => (c.group === g ? i : -1)).filter((i) => i >= 0);
+    const missing = cells.filter((i) => store.state.cells[i].owner !== p.id);
+    if (missing.length === 1) {
+      out.push({ name: meta.name, color: meta.color, missing: store.board[missing[0]].name });
+    }
+  }
+  return out;
+}
+
+// ────────────── 弹窗：资产（自己或任意对手） ──────────────
+function openAssets(playerId) {
+  const S = store.state;
+  if (!S) return;
+  const pid = playerId || store.me;
+  const p = playerById(pid);
+  if (!p) return;
+  const mine = pid === store.me;
+  const canManage = mine && isMyTurn() && S.phase === 'playing';
+
+  const held = p.held || [];
+  const jailCards = held.filter((c) => c.kind === 'jail');
+  const rentCards = held.filter((c) => c.kind === 'rent');
+  const heldHTML = held.length
+    ? `<div class="held-list">${held.map((c) => `
+        <div class="held-card ${c.kind === 'jail' ? 'is-jail' : 'is-rent'}">
+          <div class="hc-icon">${c.kind === 'jail' ? '🎫' : '🎟'}</div>
+          <div class="hc-body">
+            <div class="hc-title">${esc(c.title)}</div>
+            <div class="hc-text">${esc(c.text || '')}</div>
+          </div>
+        </div>`).join('')}</div>`
+    : '<p class="hint" style="margin:2px 0 0">没有可保留使用的卡牌。</p>';
+
+  const rows = p.props.length
+    ? p.props.map((i) => {
+      const c = store.board[i];
+      const st = S.cells[i];
+      let actions = '';
+      if (canManage) {
+        if (c.type === 'prop' && st.houses < 5) actions += `<button class="btn tiny" data-build="${i}">＋房</button>`;
+        if (st.houses > 0) actions += `<button class="btn tiny" data-sell="${i}">−房</button>`;
+        if (st.mortgaged) actions += `<button class="btn tiny" data-unmortgage="${i}">赎回</button>`;
+        else if (c.type !== 'prop' || !hasBuildings(c.group, p.id)) actions += `<button class="btn tiny" data-mortgage="${i}">抵押</button>`;
+      }
+      const status = st.mortgaged ? '抵押中' : st.houses === 5 ? '🏨 酒店' : st.houses ? `${st.houses} 栋房屋` : '空地';
+      const g = c.group ? store.groups[c.group] : null;
+      return `<div class="asset-prop" style="--c:${g ? g.color : '#7fa7c9'}">
+        <span class="ap-dot"></span>
+        <span class="ap-name">${esc(c.name)}<i>${status}</i></span>
+        <span class="ap-actions">${actions}</span>
+      </div>`;
+    }).join('')
+    : `<p class="hint" style="margin:2px 0 0">${mine ? '你还没有地产。掷骰子去占地吧。' : `${esc(p.name)} 还没有地产。`}</p>`;
+
+  const flags = [
+    p.bankrupt ? '已破产' : '',
+    p.inJail ? '狱中' : '',
+    p.connected ? '' : '离线',
+  ].filter(Boolean).join(' · ');
+
+  const summary = `
+    <div class="asset-sum">
+      <div class="as-item"><span>现金</span><b>${money(p.cash)}</b></div>
+      <div class="as-item"><span>总净值</span><b>${money(p.netWorth)}</b></div>
+      <div class="as-item"><span>地产</span><b>${p.props.length} 处</b></div>
+      <div class="as-item"><span>手牌</span><b>${held.length} 张</b></div>
+    </div>`;
+
+  openModal(`
+    <div class="modal-head">
+      <div class="mh-bar" style="--c:${p.color}"></div>
+      <div>
+        <h3>${mine ? '我的资产' : `${esc(p.name)} 的资产`}</h3>
+        <div class="mh-sub">${p.emoji} ${esc(p.name)}${mine ? ' · 你' : ''}${flags ? ' · ' + flags : ''}</div>
+      </div>
+      <button class="modal-close" data-close="1">✕</button>
+    </div>
+    <div class="modal-body">
+      ${summary}
+      <div class="asset-sec">手持卡牌<span>${jailCards.length ? `免罪票 ×${jailCards.length}` : ''}${jailCards.length && rentCards.length ? ' · ' : ''}${rentCards.length ? `议价券 ×${rentCards.length}` : ''}</span></div>
+      ${heldHTML}
+      <div class="asset-sec">地产<span>${p.props.length} 处</span></div>
+      ${rows}
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close="1">关闭</button></div>
+  `);
+  bindAssetButtons();
+}
+
+function bindAssetButtons() {
+  const root = $('#modal-root');
+  const map = { build: 'build', sell: 'sellHouse', mortgage: 'mortgage', unmortgage: 'unmortgage' };
+  Object.keys(map).forEach((attr) => {
+    $$(`[data-${attr}]`, root).forEach((b) => {
+      b.addEventListener('click', () => {
+        const idx = Number(b.dataset[attr]);
+        closeModal();
+        act({ type: map[attr], index: idx });
+      });
+    });
+  });
+}
+
+// ────────────── 弹窗：交易 ──────────────
+function openTrade() {
+  const S = store.state;
+  const me = myPlayer();
+  const others = S.players.filter((p) => !p.bankrupt && p.id !== me.id);
+  if (!others.length) return toast('没有可交易的对手');
+
+  const render = (targetId) => {
+    const target = playerById(targetId);
+    const mine = me.props.length
+      ? me.props.map((i) => tradeItem(i, 'give')).join('')
+      : '<div class="trade-empty">你没有地产</div>';
+    const theirs = target.props.length
+      ? target.props.map((i) => tradeItem(i, 'get')).join('')
+      : '<div class="trade-empty">对方没有地产</div>';
+    return `
+      <div style="margin-bottom:12px">
+        <div class="field" style="margin:0">
+          <span>交易对象</span>
+          <select id="trade-target" class="trade-select">
+            ${others.map((p) => `<option value="${p.id}" ${p.id === targetId ? 'selected' : ''}>${esc(p.name)} · ${money(p.cash)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      ${nearHint(me, target)}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div><div class="hint" style="margin:0 0 6px">你付出</div><div class="trade-list" id="give-list">${mine}</div>
+          <input id="give-cash" type="number" min="0" placeholder="现金 kr" class="cash-input" /></div>
+        <div><div class="hint" style="margin:0 0 6px">你获得</div><div class="trade-list" id="get-list">${theirs}</div>
+          <input id="get-cash" type="number" min="0" placeholder="现金 kr" class="cash-input" /></div>
+      </div>
+      <p class="hint">${target.isBot ? '对方是机器人：报价会立刻被评估，不划算就会拒绝。' : '对方会收到报价，可以接受或拒绝。'}抵押中的地产也能交易。</p>`;
+  };
+
+  const targetId = others[0].id;
+  openModal(`
+    <div class="modal-head">
+      <div class="mh-bar" style="--c:var(--gold)"></div>
+      <div><h3>发起交易</h3><div class="mh-sub">谈判是垄断的捷径</div></div>
+      <button class="modal-close" data-close="1">✕</button>
+    </div>
+    <div class="modal-body" id="trade-body">${render(targetId)}</div>
+    <div class="modal-foot">
+      <button class="btn primary" id="trade-send">发送报价</button>
+      <button class="btn ghost" data-close="1">取消</button>
+    </div>
+  `);
+  $('#trade-target').addEventListener('change', (e) => {
+    $('#trade-body').innerHTML = render(e.target.value);
+  });
+  $('#trade-send').addEventListener('click', async () => {
+    const to = $('#trade-target').value;
+    const give = $$('#give-list input:checked').map((x) => Number(x.value));
+    const get = $$('#get-list input:checked').map((x) => Number(x.value));
+    const giveCash = Number($('#give-cash').value || 0);
+    const getCash = Number($('#get-cash').value || 0);
+    closeModal();
+    await act({ type: 'offerTrade', to, give, get, giveCash, getCash });
+    toast('报价已发出，等对方回应', true);
+  });
+}
+
+function nearHint(me, target) {
+  const mine = nearSets(me);
+  const theirs = nearSets(target);
+  if (!mine.length && !theirs.length) return '';
+  const fmt = (list) => list.map((n) => `<b style="color:${n.color}">${esc(n.name)}</b>（缺 ${esc(n.missing)}）`).join('、');
+  return `<div class="near-hint">
+    ${mine.length ? `你差 1 块：${fmt(mine)}<br>` : ''}
+    ${theirs.length ? `对方差 1 块：${fmt(theirs)}` : ''}
+  </div>`;
+}
+
+function tradeItem(i, side) {
+  const c = store.board[i];
+  return `<label class="trade-item"><input type="checkbox" value="${i}" />
+    <span style="color:${c.group ? store.groups[c.group].color : '#7fa7c9'}">■</span>
+    <span style="flex:1">${esc(c.name)}</span>
+    <span style="color:#7f94ab;font-size:10px">${money(c.price)}</span></label>`;
+}
+
+// ────────────── 弹窗：规则 / 结算 ──────────────
+function openRule() {
+  openModal(`
+    <div class="modal-head">
+      <div class="mh-bar" style="--c:var(--green)"></div>
+      <div><h3>玩法速查</h3><div class="mh-sub">LOFOTEN MONOPOLY</div></div>
+      <button class="modal-close" data-close="1">✕</button>
+    </div>
+    <div class="modal-body" style="font-size:12.5px;line-height:1.7;color:#a9bccd">
+      <p><b style="color:#e6eef7">目标</b>：让其他玩家全部破产，成为最后的岛主。</p>
+      <p><b style="color:#e6eef7">回合</b>：掷两颗骰子前进；掷出对子可再掷一次，连续三次对子进监狱。</p>
+      <p><b style="color:#e6eef7">买地</b>：停在无主地块可按标价买下；放弃则留在银行。</p>
+      <p><b style="color:#e6eef7">租金</b>：停在他人地产付租。集齐同色地块，空地租金翻倍。</p>
+      <p><b style="color:#e6eef7">建造</b>：集齐同色后可建房，须平均建造；4 栋房屋可升级为酒店。</p>
+      <p><b style="color:#e6eef7">抵押</b>：抵押得半价，赎回多付 10%，抵押期间不收租。</p>
+      <p><b style="color:#e6eef7">监狱</b>：付 kr 50 保释、用免费渡轮票，或掷对子脱身（3 次机会）。</p>
+      <p><b style="color:#e6eef7">破产</b>：现金不足会自动变卖房屋与抵押地产；仍不够则出局，资产归债主。</p>
+      <p><b style="color:#e6eef7">交易</b>：自己回合内可向任一玩家发起地产 + 现金的交换。</p>
+      <p><b style="color:#e6eef7">机器人</b>：房主可在等待房间添加 AI 对手，一个人也能开局；它们会自己买地、建房、坐牢、谈交易。</p>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close="1">知道了</button></div>
+  `);
+}
+
+function openEnd() {
+  const S = store.state;
+  const rank = [...S.players].sort((a, b) => b.netWorth - a.netWorth);
+  const w = playerById(S.winnerId);
+  openModal(`
+    <div class="modal-head">
+      <div class="mh-bar" style="--c:var(--gold)"></div>
+      <div><h3>对局结束</h3><div class="mh-sub">${S.endReason === 'limit' ? '回合上限到达 · 净值结算' : 'FINAL STANDINGS'}</div></div>
+      <button class="modal-close" data-close="1">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="win-title">${w ? `🏆 ${esc(w.name)}` : '无人幸存'}</div>
+      ${rank.map((p, idx) => `
+        <div class="rank-row ${idx === 0 ? 'first' : ''}">
+          <span class="rank-no">${idx + 1}</span>
+          <span style="font-size:15px">${p.emoji}</span>
+          <span class="rank-name">${esc(p.name)}${p.bankrupt ? ' <span style="font-size:10px;color:#7f94ab">已破产</span>' : ''}</span>
+          <span class="rank-val">${money(p.netWorth)}</span>
+        </div>`).join('')}
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="1">继续查看棋盘</button>
+      ${S.hostId === store.me ? '<button class="btn primary" id="btn-rematch">开新一局</button>' : ''}
+    </div>
+  `);
+  $('#btn-rematch')?.addEventListener('click', () => { closeModal(); act({ type: 'restart' }); });
+}
+
+// ────────────── toast ──────────────
+let toastTimer = null;
+function toast(msg, ok = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.toggle('ok', ok);
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// 状态切换时重置结算弹窗标记
+let lastPhase = null;
+setInterval(() => {
+  const ph = store.state?.phase;
+  if (ph !== lastPhase) {
+    lastPhase = ph;
+    if (ph !== 'ended') store.endShown = false;
+  }
+}, 400);
+
+boot().catch((e) => {
+  console.error(e);
+  toast('加载失败：' + e.message);
+});

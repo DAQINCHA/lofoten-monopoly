@@ -1,0 +1,14 @@
+{
+  "name": "lofoten-monopoly",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "罗弗敦群岛主题大富翁 · 局域网联机",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
