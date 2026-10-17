@@ -430,15 +430,25 @@ function endTurn(room) {
 
 const G = (i) => BOARD[i];
 
-function salary(room, p) {
+// landed：正好停在起点（而不是路过）。措辞分开，避免和下面落地的那句重复
+function salary(room, p, opts = {}) {
   p.cash += SALARY;
-  pushLog(room, `${p.name} 绕过最后一道礁石回到旅程起点，领到 ${kr(SALARY)} 的过路津贴`, 'money', SALARY);
+  const lead = opts.landed
+    ? `${p.name} 稳稳停在旅程起点`
+    : `${p.name} 绕过最后一道礁石回到旅程起点`;
+  const what = opts.landed ? '起点津贴' : '过路津贴';
+  pushLog(room, `${lead}，领到 ${kr(SALARY)} 的${what}`, 'money', SALARY);
 }
 
+// 返回是否刚领过津贴，好让落地播报别再重复一句
 function moveBy(room, p, steps) {
   const before = p.pos;
   p.pos = (p.pos + steps) % BOARD_SIZE;
-  if (p.pos < before) salary(room, p);
+  if (p.pos < before) {
+    salary(room, p, { landed: p.pos === 0 });
+    return true;
+  }
+  return false;
 }
 
 function sendToJail(room, p, opts = {}) {
@@ -451,13 +461,15 @@ function sendToJail(room, p, opts = {}) {
 }
 
 // ─────────────────────────── 落地处理 ───────────────────────────
-function resolveLanding(room, p, depth = 0) {
+function resolveLanding(room, p, depth = 0, opts = {}) {
   if (depth > 6) return;
   const cell = G(p.pos);
   const st = room.cells[p.pos];
 
   switch (cell.type) {
     case 'go':
+      // 正好停在起点时津贴那条已经播过（带金额），这里不再重复上大屏
+      if (opts.salaryPaid) return;
       pushLog(room, `${p.name} 稳稳停在旅程起点，船帆收得整整齐齐`, 'sys');
       return;
     case 'jail':
@@ -613,8 +625,9 @@ function drawCard(room, p, which, depth) {
     if (typeof target !== 'number') return;
     const passed = target <= p.pos;
     p.pos = target;
-    if (passed) salary(room, p);
-    resolveLanding(room, p, depth + 1);
+    // 卡面已经写明会领多少，这条只记账：津贴由 salary 播，落地那句则让位给它
+    if (passed) salary(room, p, { landed: target === 0 });
+    resolveLanding(room, p, depth + 1, { salaryPaid: passed });
   }
 }
 
@@ -872,8 +885,8 @@ export function act(room, playerId, action) {
         return { ok: true };
       }
 
-      moveBy(room, p, d1 + d2);
-      resolveLanding(room, p);
+      const gotSalary = moveBy(room, p, d1 + d2);
+      resolveLanding(room, p, 0, { salaryPaid: gotSalary });
       room.rollAgain = isDouble && !p.inJail;
       if (!room.pending && room.rollAgain) {
         room.canRoll = true;
@@ -953,8 +966,8 @@ export function act(room, playerId, action) {
         room.canRoll = false;
         room.rollAgain = false;
         pushLog(room, `对子！${p.name} 重获自由并前进 ${d1 + d2} 格`, 'jail');
-        moveBy(room, p, d1 + d2);
-        resolveLanding(room, p);
+        const gotSalary = moveBy(room, p, d1 + d2);
+        resolveLanding(room, p, 0, { salaryPaid: gotSalary });
         return { ok: true };
       }
       p.jailTurns++;
@@ -965,8 +978,8 @@ export function act(room, playerId, action) {
         p.jailTurns = 0;
         room.pending = null;
         pushLog(room, `${p.name} 三次未掷出对子，缴纳保释金后出狱并前进 ${d1 + d2} 格`, 'jail');
-        moveBy(room, p, d1 + d2);
-        resolveLanding(room, p);
+        const gotSalary = moveBy(room, p, d1 + d2);
+        resolveLanding(room, p, 0, { salaryPaid: gotSalary });
         return { ok: true };
       }
       room.pending = null;
