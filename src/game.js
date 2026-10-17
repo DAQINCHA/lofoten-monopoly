@@ -576,6 +576,8 @@ function drawCard(room, p, which, depth) {
       feeTotal += c.houses === 5 ? (card.feePerHotel || 0) : c.houses * (card.feePerHouse || 0);
     });
   }
+  // 只折进卡面自带的收支（card.money / payEach / 修房费）；「回到起点」这类要靠移动
+  // 才产生的津贴不折进来，走 salary() 单独播一条带金额的
   let moneyDelta = card.money || 0;
   if (card.payEach) moneyDelta -= card.payEach * others.length;
   if (feeTotal > 0) moneyDelta -= feeTotal;
@@ -625,7 +627,6 @@ function drawCard(room, p, which, depth) {
     if (typeof target !== 'number') return;
     const passed = target <= p.pos;
     p.pos = target;
-    // 卡面已经写明会领多少，这条只记账：津贴由 salary 播，落地那句则让位给它
     if (passed) salary(room, p, { landed: target === 0 });
     resolveLanding(room, p, depth + 1, { salaryPaid: passed });
   }
