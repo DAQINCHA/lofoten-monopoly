@@ -607,7 +607,7 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   overflow-wrap: anywhere;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
-.cell-price { font-size: clamp(5px, 0.86cqw, 10.5px); color: var(--muted); font-variant-numeric: tabular-nums; }
+.cell-price { font-size: clamp(5px, 0.86cqw, 10.5px); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1.1; }
 .cell-en {
   max-width: 100%;
   font-size: clamp(4.5px, 0.78cqw, 8.5px);

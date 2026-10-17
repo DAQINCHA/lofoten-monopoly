@@ -560,21 +560,21 @@ function cellContent(c) {
     return `<div class="cell-main">
         <div class="cell-name">${cellLabel(c.name)}</div>
         ${en}
-        <div class="cell-price">${c.price}</div>
+        <div class="cell-price">${fmt(c.price)}</div>
       </div>`;
   }
   if (c.type === 'ferry' || c.type === 'util') {
     return `<div class="cell-main">
         <div class="cell-name">${cellLabel(c.name)}</div>
         ${en}
-        <div class="cell-price">${c.price}</div>
+        <div class="cell-price">${fmt(c.price)}</div>
       </div>`;
   }
   if (c.type === 'tax') {
     return `<div class="cell-main">
         <div class="cell-name">${cellLabel(c.name)}</div>
         ${en}
-        <div class="cell-price">−${c.amount}</div>
+        <div class="cell-price">−${fmt(c.amount)}</div>
       </div>`;
   }
   return `<div class="cell-main">
@@ -1054,7 +1054,7 @@ function renderActions() {
     if (myTurn) {
       h += `<div class="decision">
         <div class="d-title">${c.icon} ${esc(c.name)}</div>
-        <div class="d-sub">kr ${c.price} · 租金 kr ${c.rent ? c.rent[0] : '—'}${c.type === 'prop' ? `（成套 ×2）` : ''}<br>你手上有 ${money(me.cash)}</div>
+        <div class="d-sub">${money(c.price)} · 租金 ${c.rent ? money(c.rent[0]) : '—'}${c.type === 'prop' ? `（成套 ×2）` : ''}<br>你手上有 ${money(me.cash)}</div>
         <div class="d-row">
           <button class="btn primary" data-action="buy" ${me.cash < c.price ? 'disabled' : ''}>买下</button>
           <button class="btn ghost" data-action="pass">放弃</button>
@@ -1070,7 +1070,7 @@ function renderActions() {
     if (myTurn) {
       h += `<div class="decision jail-decision">
         <div class="d-title">🔒 你在监狱</div>
-        <div class="d-sub">支付 kr ${store.meta.JAIL_FINE} 保释，或掷出对子脱身（最多 3 次）。</div>
+        <div class="d-sub">支付 ${money(store.meta.JAIL_FINE)} 保释，或掷出对子脱身（最多 3 次）。</div>
         <div class="d-row"><button class="btn primary" data-action="jailPay">付保释金</button>
         <button class="btn" data-action="jailRoll">掷骰求对子</button></div>
         ${me.cards ? `<div class="d-row" style="margin-top:7px"><button class="btn ghost" data-action="jailCard">用免费渡轮票（${me.cards}）</button></div>` : ''}
@@ -1192,10 +1192,10 @@ function openProperty(i) {
     });
     const rentLabels = ['空地', '成套空地（×2）', '1 栋房屋', '2 栋房屋', '3 栋房屋', '4 栋房屋', '酒店'];
     body += `<table class="rent-table">`;
-    body += `<tr class="${st.houses === 0 && !owns ? 'hi' : ''}"><td>${rentLabels[0]}</td><td>kr ${c.rent[0]}</td></tr>`;
-    body += `<tr class="${st.houses === 0 && owns ? 'hi' : ''}"><td>${rentLabels[1]}</td><td>kr ${c.rent[0] * 2}</td></tr>`;
+    body += `<tr class="${st.houses === 0 && !owns ? 'hi' : ''}"><td>${rentLabels[0]}</td><td>${money(c.rent[0])}</td></tr>`;
+    body += `<tr class="${st.houses === 0 && owns ? 'hi' : ''}"><td>${rentLabels[1]}</td><td>${money(c.rent[0] * 2)}</td></tr>`;
     for (let hIdx = 1; hIdx <= 5; hIdx++) {
-      body += `<tr class="${st.houses === hIdx ? 'hi' : ''}"><td>${rentLabels[hIdx + 1]}</td><td>kr ${c.rent[hIdx]}</td></tr>`;
+      body += `<tr class="${st.houses === hIdx ? 'hi' : ''}"><td>${rentLabels[hIdx + 1]}</td><td>${money(c.rent[hIdx])}</td></tr>`;
     }
     body += `</table>`;
     body += `<div style="margin-top:12px">
@@ -1207,15 +1207,15 @@ function openProperty(i) {
   } else if (c.type === 'ferry') {
     body += `<div class="kv"><span>票价</span><b>${money(c.price)}</b></div>`;
     c.rent.forEach((r, idx) => {
-      body += `<div class="kv"><span>持有 ${idx + 1} 座渡口</span><b>kr ${r}</b></div>`;
+      body += `<div class="kv"><span>持有 ${idx + 1} 座渡口</span><b>${money(r)}</b></div>`;
     });
   } else if (c.type === 'util') {
     body += `<div class="kv"><span>价格</span><b>${money(c.price)}</b></div>
-      <div class="kv"><span>持有 1 处</span><b>骰子点数 × 4</b></div>
-      <div class="kv"><span>持有 2 处</span><b>骰子点数 × 10</b></div>`;
+      <div class="kv"><span>持有 1 处</span><b>骰子点数 × ${fmt(store.meta.UTIL_RENT_PER_PIP)}</b></div>
+      <div class="kv"><span>持有 2 处</span><b>骰子点数 × ${fmt(store.meta.UTIL_RENT_BOTH)}</b></div>`;
   } else {
     const desc = {
-      go: '经过或停留领取 kr 200。',
+      go: `经过或停留领取 ${money(store.meta.SALARY)}。`,
       jail: '探访监狱，不受影响。',
       parking: '免费歇脚，抬头看一会儿极光。',
       gotojail: '非法捕鳕鱼被当场抓获，直接进监狱。',
@@ -1469,12 +1469,13 @@ function openRule() {
     </div>
     <div class="modal-body" style="font-size:12.5px;line-height:1.7;color:#a9bccd">
       <p><b style="color:#e6eef7">目标</b>：让其他玩家全部破产，成为最后的岛主。</p>
+      <p><b style="color:#e6eef7">起始</b>：每人 ${money(store.meta.START_CASH)}；经过起点领 ${money(store.meta.SALARY)}。</p>
       <p><b style="color:#e6eef7">回合</b>：掷两颗骰子前进；掷出对子可再掷一次，连续三次对子进监狱。</p>
       <p><b style="color:#e6eef7">买地</b>：停在无主地块可按标价买下；放弃则留在银行。</p>
       <p><b style="color:#e6eef7">租金</b>：停在他人地产付租。集齐同色地块，空地租金翻倍。</p>
       <p><b style="color:#e6eef7">建造</b>：集齐同色后可建房，须平均建造；4 栋房屋可升级为酒店。</p>
       <p><b style="color:#e6eef7">抵押</b>：抵押得半价，赎回多付 10%，抵押期间不收租。</p>
-      <p><b style="color:#e6eef7">监狱</b>：付 kr 50 保释、用免费渡轮票，或掷对子脱身（3 次机会）。</p>
+      <p><b style="color:#e6eef7">监狱</b>：付 ${money(store.meta.JAIL_FINE)} 保释、用免费渡轮票，或掷对子脱身（3 次机会）。</p>
       <p><b style="color:#e6eef7">破产</b>：现金不足会自动变卖房屋与抵押地产；仍不够则出局，资产归债主。</p>
       <p><b style="color:#e6eef7">交易</b>：自己回合内可向任一玩家发起地产 + 现金的交换。</p>
       <p><b style="color:#e6eef7">机器人</b>：房主可在等待房间添加 AI 对手，一个人也能开局；它们会自己买地、建房、坐牢、谈交易。</p>
