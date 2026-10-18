@@ -641,6 +641,7 @@ function drawCard(room, p, which, depth, forced) {
   // 才产生的津贴不折进来，走 salary() 单独播一条带金额的
   let moneyDelta = card.money || 0;
   if (card.payEach) moneyDelta -= card.payEach * others.length;
+  if (card.payAll) moneyDelta -= card.payAll;
   if (feeTotal > 0) moneyDelta -= feeTotal;
   pushLog(room, `${isChance ? '极光卡' : '命运卡'} · ${card.title}：${card.text}`, 'card', moneyDelta);
 
@@ -665,6 +666,10 @@ function drawCard(room, p, which, depth, forced) {
   }
   if (card.payEach) {
     others.forEach((o) => charge(room, p, card.payEach, card.title, o, { quiet: true }));
+  }
+  if (card.payAll) {
+    // 「社区维护费」一类：每位存活玩家（含抽卡者）各向银行缴 card.payAll
+    activePlayers(room).forEach((o) => charge(room, o, card.payAll, card.title, null, { quiet: true }));
   }
   if (feeTotal > 0) {
     charge(room, p, feeTotal, card.title, null, { quiet: true });

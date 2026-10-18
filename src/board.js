@@ -56,7 +56,7 @@ export const BOARD = [
   },
   prop('豪克兰', 'Haukland', 'C', 14000, [1000, 5000, 15000, 45000, 62500, 75000], 10000, '🏝'),
   prop('温斯塔', 'Unstad', 'C', 16000, [1200, 6000, 18000, 50000, 70000, 90000], 10000, '🏄'),
-  { type: 'ferry', name: '雷讷渡口', en: 'Reine', icon: '⛴', price: FERRY_PRICE, rent: FERRY_RENT },
+  { type: 'ferry', name: '韦略渡口', en: 'Værøy', icon: '⛴', price: FERRY_PRICE, rent: FERRY_RENT },
   prop('卡贝尔沃格', 'Kabelvåg', 'D', 18000, [1400, 7000, 20000, 55000, 75000, 95000], 10000, '⛪'),
   { type: 'chest', name: '命运卡', en: 'Skjebne', icon: '🎴' },
   prop('斯塔姆松', 'Stamsund', 'D', 18000, [1400, 7000, 20000, 55000, 75000, 95000], 10000, '🎣'),
@@ -101,7 +101,7 @@ export const BOARD_SIZE = BOARD.length;
 // jail: 入狱 | jailCard: 免罪卡 | skip: 停一回合 | salary: 经过起点领钱
 // hold: 可保留的卡（'rent' 付租减半），进玩家手牌，随时可在资产里查看
 export const CHANCE = [
-  { title: '午夜太阳', text: '太阳不下山，玩得忘了时间。立即回到旅程起点，领取 kr 20,000。', moveTo: 0, salary: true },
+  { title: '午夜太阳', text: '太阳不下山，玩得忘了时间。立即回到旅程起点。', moveTo: 0 },
   { title: '巨鳕上钩', text: '捕到一条打破纪录的鳕鱼，鱼市老板慷慨解囊。获得 kr 15,000。', money: 15000 },
   { title: '风暴掀翻晒鱼架', text: '晒鱼架倒了。每栋房屋支付 kr 2,500，每座酒店支付 kr 10,000。', feePerHouse: 2500, feePerHotel: 10000 },
   { title: '极光摄影大赛', text: '你在汉姆内岛拍到了完美极光。获得奖金 kr 10,000。', money: 10000 },
@@ -127,7 +127,7 @@ export const CHEST = [
   { title: '回到起点', text: '回家补给。回到旅程起点，领取 kr 20,000。', moveTo: 0, salary: true },
   { title: '海钓之旅', text: '租船出海钓鳕鱼，收获一般。支付 kr 10,000。', money: -10000 },
   { title: '继承一间罗布小屋', text: '远房亲戚留给你一间红色渔屋。获得 kr 25,000。', money: 25000 },
-  { title: '社区维护费', text: '码头需要修缮，大家分摊。支付 kr 5,000。', money: -5000 },
+  { title: '社区维护费', text: '码头需要修缮，大家分摊。每位岛民各缴 kr 5,000。', payAll: 5000 },
   { title: '北极熊来访', text: '一头北极熊在村口徘徊，全村疏散。后退 2 格。', back: 2 },
   { title: '渔市议价券', text: '鱼市老板给了你一张议价券：付租时自动抵掉一半，用掉即失效。', hold: 'rent' },
 ];
