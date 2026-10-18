@@ -77,6 +77,8 @@ export function createRoom(name) {
     // 按顺序记下来交给前端照着演，前端不用再靠"最短路径"猜方向
     trails: {},
     moveSeq: 0,
+    // 测试模式：房主可开，用于手动摆位、指定抽某张卡，方便验证动画与结算
+    debug: false,
     createdAt: Date.now(),
   };
   room.chanceOrder = shuffle(CHANCE.map((_, i) => i));
@@ -225,7 +227,10 @@ export function markDisconnected(room, playerId) {
 // ─────────────────────────── 机器人 ───────────────────────────
 export function addBot(room, requesterId) {
   if (room.hostId !== requesterId) return { error: '只有房主可以添加机器人' };
-  if (room.phase !== 'lobby') return { error: '对局开始后不能添加机器人' };
+  // 测试模式允许边打边加：想看人机互抢地产、收租这类情形时不用重开
+  if (room.phase !== 'lobby' && !(room.phase === 'playing' && room.debug)) {
+    return { error: '对局开始后不能添加机器人' };
+  }
   if (room.players.length >= MAX_PLAYERS) return { error: `房间满了（最多 ${MAX_PLAYERS} 人）` };
   const used = new Set(room.players.map((p) => p.name));
   const pool = BOT_NAMES.filter((n) => !used.has(n));
@@ -239,10 +244,23 @@ export function addBot(room, requesterId) {
 
 export function removeBot(room, requesterId, botId) {
   if (room.hostId !== requesterId) return { error: '只有房主可以移除机器人' };
-  if (room.phase !== 'lobby') return { error: '对局中不能移除机器人' };
+  if (room.phase !== 'lobby' && !(room.phase === 'playing' && room.debug)) {
+    return { error: '对局中不能移除机器人' };
+  }
   const idx = room.players.findIndex((p) => p.id === botId && p.isBot);
   if (idx < 0) return { error: '找不到这个机器人' };
   const [p] = room.players.splice(idx, 1);
+  // 局中移除：把当前指针拨回去，别让下一位被跳过（或轮到已经出局的人）
+  if (room.phase === 'playing' && room.players.length) {
+    if (idx < room.current) room.current -= 1;
+    else if (idx === room.current) {
+      let guard = 0;
+      do {
+        room.current = (room.current + 1) % room.players.length;
+        guard++;
+      } while (cur(room).bankrupt && guard < 50);
+    }
+  }
   pushLog(room, `🤖 ${p.name} 离开了房间`, 'sys');
   return { ok: true };
 }
@@ -280,6 +298,7 @@ export function snapshot(room) {
     turnLimit: room.turnLimit,
     // 本次行动里棋子的位移轨迹（分段的），前端照着演；moveSeq 变了才是一条新轨迹
     moveSeq: room.moveSeq || 0,
+    debug: !!room.debug,
     cells: room.cells,
     bank: room.bank,
     log: room.log.slice(-70),
@@ -350,7 +369,8 @@ function pushLog(room, text, kind = 'sys', delta = 0, opts = {}) {
 function startGame(room, playerId) {
   if (room.hostId !== playerId) return { error: '只有房主可以开始游戏' };
   if (room.phase !== 'lobby') return { error: '游戏已经开始了' };
-  if (room.players.length < 2) return { error: '至少需要 2 名玩家' };
+  // 测试模式一个人也能开局：自己一个人慢慢摆位、抽卡，看各种情形
+  if (room.players.length < 2 && !room.debug) return { error: '至少需要 2 名玩家' };
   room.phase = 'playing';
   // 还有人没掷骰：开局替他补掷一次，保证顺序公平
   room.players.forEach((p) => {
@@ -449,12 +469,30 @@ function salary(room, p, opts = {}) {
   pushLog(room, `${lead}，领到 ${kr(SALARY)} 的${what}`, 'money', SALARY);
 }
 
-// 记一段位移：mode = walk 顺时针逐格 / back 逆时针逐格（只有卡牌的"后退 N 格"是 back）
+// 记一段位移：mode = walk 顺时针逐格 / back 逆时针逐格 / jump 直接押送（不沿棋盘走）
+// 按官方大富翁规则，只有「后退 N 格」那张卡是逆时针；
+// 「前往某地」「回到起点」一律顺时针前进（可能绕过起点领津贴）；
+// 进监狱是 "Go directly to Jail. Do not pass GO"，所以用 jump：一步到位，绝不经过起点。
 function markMove(room, p, from, to, mode) {
   if (from === to) return;
   if (!room.trails) room.trails = {};
   const list = room.trails[p.id] || (room.trails[p.id] = []);
   list.push({ from, to, mode });
+}
+
+// 顺时针方向离 from 最近的某类卡格（极光卡 3 格、命运卡 3 格）；
+// 已经站在同类卡格上就返回 -1，表示不用走
+function nearestCardCell(from, type) {
+  // 已经站在同类卡格上就原地抽，别再往前绕一圈到下一格
+  if (G(from).type === type) return -1;
+  let best = -1;
+  let bestD = BOARD_SIZE;
+  BOARD.forEach((c, i) => {
+    if (c.type !== type) return;
+    const d = (i - from + BOARD_SIZE) % BOARD_SIZE;
+    if (d > 0 && d < bestD) { bestD = d; best = i; }
+  });
+  return best;
 }
 
 // 返回是否刚领过津贴，好让落地播报别再重复一句
@@ -473,8 +511,8 @@ function sendToJail(room, p, opts = {}) {
   const before = p.pos;
   const jailIdx = BOARD.findIndex((c) => c.type === 'jail');
   p.pos = jailIdx;
-  // 进监狱也顺着棋盘顺时针走过去（不领津贴）
-  markMove(room, p, before, p.pos, 'walk');
+  // 官方规则：直接进监狱，不沿棋盘走、也不经过起点（自然没有津贴）
+  markMove(room, p, before, p.pos, 'jump');
   p.inJail = true;
   p.jailTurns = 0;
   room.canRoll = false;
@@ -581,13 +619,14 @@ function rentOf(room, index, diceSum) {
 }
 
 // ─────────────────────────── 卡牌 ───────────────────────────
-function drawCard(room, p, which, depth) {
+// forced：测试模式直接指定一张卡（不打乱牌堆指针，方便反复复现）
+function drawCard(room, p, which, depth, forced) {
   const isChance = which === 'chance';
   const deck = isChance ? CHANCE : CHEST;
   const order = isChance ? room.chanceOrder : room.chestOrder;
   const ptrKey = isChance ? 'chancePtr' : 'chestPtr';
-  const card = deck[order[room[ptrKey] % order.length]];
-  room[ptrKey]++;
+  const card = forced || deck[order[room[ptrKey] % order.length]];
+  if (!forced) room[ptrKey]++;
 
   // 先把这张卡对现金的影响算清楚，播报只发一条：卡面 + 总金额
   const others = card.payEach ? activePlayers(room).filter((o) => o.id !== p.id) : [];
@@ -845,7 +884,7 @@ function chat(room, p, text) {
 }
 
 // 这些操作会让棋子动起来，每次都重新开一条位移轨迹
-const MOVE_ACTIONS = new Set(['roll', 'jailRoll']);
+const MOVE_ACTIONS = new Set(['roll', 'jailRoll', 'debugMove', 'debugGoTo', 'debugCard']);
 
 export function act(room, playerId, action) {
   const p = byId(room, playerId);
@@ -863,6 +902,13 @@ export function act(room, playerId, action) {
   }
   if (type === 'addBot') return addBot(room, playerId);
   if (type === 'removeBot') return removeBot(room, playerId, action.playerId);
+  // 测试模式的开关放在局外也能用：这样可以从大厅直接开一局单人测试
+  if (type === 'setDebug') {
+    if (room.hostId !== playerId) return { error: '只有房主能开关测试模式' };
+    room.debug = !!action.on;
+    pushLog(room, `🧪 ${p.name}${room.debug ? '开启了' : '关闭了'}测试模式`, 'sys', 0, { quiet: true });
+    return { ok: true };
+  }
   if (type === 'rollOrder') return rollOrder(room, p);
   if (type === 'restart') {
     if (room.hostId !== playerId) return { error: '只有房主可以重开' };
@@ -899,12 +945,25 @@ export function act(room, playerId, action) {
   if (p.bankrupt) return { error: '你已经出局了' };
   const isTurn = cur(room)?.id === p.id;
 
-  // 会移动棋子的操作：开新的位移轨迹，前端据此一段一段演
-  if (MOVE_ACTIONS.has(type)) {
-    room.trails = {};
-    room.moveSeq = (room.moveSeq || 0) + 1;
+  const run = () => dispatch(room, p, action, isTurn);
+  // 会移动棋子的操作：开新的位移轨迹，前端据此一段一段演。
+  // 被拒时（比如"先处理当前的决定"）要把旧轨迹还回去——否则前端拿到一条空轨迹，
+  // 会把还没演完的那段路程直接吞掉，棋子就地闪现到终点。
+  if (!MOVE_ACTIONS.has(type)) return run();
+  const savedTrails = room.trails;
+  const savedSeq = room.moveSeq;
+  room.trails = {};
+  room.moveSeq = (room.moveSeq || 0) + 1;
+  const res = run();
+  if (res && res.error) {
+    room.trails = savedTrails;
+    room.moveSeq = savedSeq;
   }
+  return res;
+}
 
+function dispatch(room, p, action, isTurn) {
+  const type = action?.type;
   switch (type) {
     case 'roll': {
       if (!isTurn) return { error: '还没轮到你' };
@@ -1025,6 +1084,71 @@ export function act(room, playerId, action) {
       room.pending = null;
       room.canRoll = false;
       pushLog(room, `${p.name} 仍被关押（${p.jailTurns}/3）`, 'jail');
+      return { ok: true };
+    }
+
+    // ── 测试模式：手动摆位 / 指定抽卡，用来复现那些很难碰上的情形 ──
+    // （开关 setDebug 在局内外都能用，见 act() 顶部）
+    case 'debugMove': {
+      if (!room.debug) return { error: '测试模式没开' };
+      if (!isTurn) return { error: '还没轮到你' };
+      if (room.pending) return { error: '先处理当前的决定' };
+      let steps = Math.trunc(Number(action.steps) || 0);
+      steps = Math.max(-39, Math.min(39, steps));
+      if (!steps) return { error: '请输入格数' };
+      room.dice = [0, 0];
+      pushLog(room, `🧪 测试：${p.name} 直接走 ${steps > 0 ? '前进' : '后退'} ${Math.abs(steps)} 格`, 'sys', 0, { quiet: true });
+      const gotSalary = moveBy(room, p, steps);
+      resolveLanding(room, p, 0, { salaryPaid: gotSalary });
+      room.canRoll = false;
+      room.rollAgain = false;
+      return { ok: true };
+    }
+    case 'debugGoTo': {
+      if (!room.debug) return { error: '测试模式没开' };
+      if (!isTurn) return { error: '还没轮到你' };
+      if (room.pending) return { error: '先处理当前的决定' };
+      const target = Math.trunc(Number(action.index));
+      if (!(target >= 0 && target < BOARD_SIZE)) return { error: '格子不存在' };
+      const steps = (target - p.pos + BOARD_SIZE) % BOARD_SIZE;
+      room.dice = [0, 0];
+      pushLog(room, `🧪 测试：${p.name} 前往第 ${target} 格「${G(target).name}」`, 'sys', 0, { quiet: true });
+      const gotSalary = moveBy(room, p, steps);
+      resolveLanding(room, p, 0, { salaryPaid: gotSalary });
+      room.canRoll = false;
+      room.rollAgain = false;
+      return { ok: true };
+    }
+    case 'debugCard': {
+      if (!room.debug) return { error: '测试模式没开' };
+      if (!isTurn) return { error: '还没轮到你' };
+      if (room.pending) return { error: '先处理当前的决定' };
+      const which = action.which === 'chest' ? 'chest' : 'chance';
+      const deck = which === 'chest' ? CHEST : CHANCE;
+      const card = deck[Math.trunc(Number(action.index))];
+      if (!card) return { error: '没有这张卡' };
+      room.dice = [0, 0];
+      // 和真实游戏一致：先顺时针走到最近的同类卡格，站上去才抽这张卡，
+      // 这样卡片里的位移（后退 / 前往 / 进监狱）都是从卡格出发的，看得清清楚楚
+      const spot = nearestCardCell(p.pos, which);
+      if (spot >= 0 && spot !== p.pos) {
+        pushLog(
+          room,
+          `🧪 测试：${p.name} 先顺时针走到第 ${spot} 格「${G(spot).name}」`,
+          'sys',
+        );
+        moveBy(room, p, (spot - p.pos + BOARD_SIZE) % BOARD_SIZE);
+        // 这里不调 resolveLanding：卡格落地本该抽一张随机的，
+        // 而我们要的是下面那张自己指定的卡，别又冒出一张来
+      }
+      pushLog(
+        room,
+        `🧪 测试：${p.name} 抽${which === 'chest' ? '命运卡' : '极光卡'}「${card.title}」`,
+        'sys', 0, { quiet: true },
+      );
+      drawCard(room, p, which, 0, card);
+      room.canRoll = false;
+      room.rollAgain = false;
       return { ok: true };
     }
 

@@ -18,6 +18,7 @@ const store = {
   tokenEls: new Map(),
   viewPos: new Map(),
   moveQ: new Map(),      // 棋子待走的分段轨迹：pid -> [{from, to, mode}]
+  pathStash: new Map(),  // 暂时接不上的轨迹（上一段还没走完 / 棋子不在弧上），等走到再接
   moveSeq: -1,           // 已消费过的轨迹编号
   moveHold: false,       // 多段位移之间按住棋子，先把播报放出来
   moveHoldTimer: null,   // 兜底：一直没有播报也要继续走
@@ -28,6 +29,10 @@ const store = {
   cashFxQueue: [],       // 待播的金额变化，等对应播报上屏才飘
   cashFxTimer: null,     // 兜底：等太久也放出来
   moveTimer: null,
+  actionsStaleTimer: null, // 走子期间按钮是禁用的，等落地后再渲染一次放开
+  jailFxTimers: new Map(), // 押送进监狱的落地动作，播完就摘掉 class（按棋子 / 格子分别计时）
+  glideTimers: new Map(),  // 直线押送过程中别让逐格走的短过渡抢戏
+  jailLandTimers: new Map(), // 押送落地（响闷响 + 抖动）的时刻
   diceBusyUntil: 0,
   lastTurnKey: '',
   turnKey: '',
@@ -131,9 +136,153 @@ async function boot() {
   showScreen('lobby');
 }
 
+// ────────────── 测试模式：手动走子 / 指定抽卡 ──────────────
+// 很多情形（入狱卡、回到起点、绕大半圈）随机很难碰上，开这个面板可以一键复现
+// 开关在大厅的「🧪 测试模式 · 单人直接开局」，进房后没有单独的入口按钮，
+// 面板只保留收起 / 展开（毕竟没人会在测试局里想着"关掉测试模式"）
+const DP_FOLD_KEY = 'lofoten:debug-fold';
+
+// 收起后面板只留标题栏一条，方便让开棋盘；状态存下来，下次进来还是收着的
+function setDebugFold(folded) {
+  const panel = $('#debug-panel');
+  if (!panel) return;
+  panel.classList.toggle('folded', folded);
+  const btn = $('#dp-collapse');
+  if (btn) {
+    btn.textContent = folded ? '▸' : '▾';
+    btn.title = folded ? '展开面板' : '收起面板';
+    btn.setAttribute('aria-label', btn.title);
+  }
+  // 收起会矮一截，原来贴在屏幕下沿时得重新夹回可见范围
+  const r = panel.getBoundingClientRect();
+  applyPanelPos(r.left, r.top);
+  try { localStorage.setItem(DP_FOLD_KEY, folded ? '1' : '0'); } catch { /* 无痕模式 */ }
+}
+
+function toggleDebugFold() {
+  const panel = $('#debug-panel');
+  if (panel) setDebugFold(!panel.classList.contains('folded'));
+}
+
+function onDebugClick(e) {
+  const btn = e.target.closest('[data-dbg]');
+  if (!btn) return;
+  const kind = btn.dataset.dbg;
+  const num = (sel) => Number($(sel)?.value || 0);
+  if (kind === 'collapse') return toggleDebugFold();
+  if (kind === 'move') return act({ type: 'debugMove', steps: Math.abs(num('#dbg-steps')) || 1 });
+  if (kind === 'moveBack') return act({ type: 'debugMove', steps: -Math.abs(num('#dbg-steps')) || -1 });
+  if (kind === 'goto') return act({ type: 'debugGoTo', index: num('#dbg-cell') });
+  if (kind === 'chance') return act({ type: 'debugCard', which: 'chance', index: num('#dbg-chance') });
+  if (kind === 'chest') return act({ type: 'debugCard', which: 'chest', index: num('#dbg-chest') });
+  if (kind === 'addBot') return act({ type: 'addBot' });
+  if (kind === 'removeBot') {
+    // 移除最后加入的那个机器人，方便把刚才加的撤掉
+    const bots = (store.state?.players || []).filter((p) => p.isBot);
+    const last = bots[bots.length - 1];
+    if (!last) return toast('房间里没有机器人');
+    return act({ type: 'removeBot', playerId: last.id });
+  }
+}
+
+// ────────────── 测试面板：按住标题栏可以拖到任意位置 ──────────────
+const DP_POS_KEY = 'lofoten:debug-pos';
+
+// 面板位置一律用 left/top 表示（CSS 里是左下角定位，拖动时要把 bottom 摘掉，
+// 否则 left/top/bottom 同时生效会把面板拉成一条）
+function applyPanelPos(left, top) {
+  const panel = $('#debug-panel');
+  if (!panel) return;
+  const w = panel.offsetWidth || 320;
+  const h = panel.offsetHeight || 250;
+  panel.style.left = Math.max(6, Math.min(left, Math.max(6, innerWidth - w - 6))) + 'px';
+  panel.style.top = Math.max(56, Math.min(top, Math.max(56, innerHeight - h - 6))) + 'px';
+  panel.style.bottom = 'auto';
+}
+
+// 面板刚显示出来（尺寸才算得出来）时把位置定下来：有存过就用存的位置，否则贴左下角
+function initPanelPos() {
+  const panel = $('#debug-panel');
+  if (!panel || panel.dataset.pos) return;
+  panel.dataset.pos = '1';
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(DP_POS_KEY) || 'null'); } catch { /* 无痕模式 */ }
+  if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+    applyPanelPos(saved.left, saved.top);
+  } else {
+    applyPanelPos(14, innerHeight - (panel.offsetHeight || 250) - 14);
+  }
+}
+
+function initDebugPanelDrag() {
+  const panel = $('#debug-panel');
+  const head = $('#dp-head');
+  if (!panel || !head) return;
+
+  head.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.dp-close')) return; // 标题栏上的关闭按钮不参与拖动
+    const r = panel.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    // 指针捕获：拖得再快、指针跑到别的元素上，事件也只会回到标题栏
+    try { head.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
+    panel.classList.add('dragging');
+    const move = (ev) => applyPanelPos(ev.clientX - dx, ev.clientY - dy);
+    const up = () => {
+      try { head.releasePointerCapture(e.pointerId); } catch { /* 已经放开了 */ }
+      head.removeEventListener('pointermove', move);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+      panel.classList.remove('dragging');
+      const rect = panel.getBoundingClientRect();
+      try {
+        localStorage.setItem(DP_POS_KEY, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) }));
+      } catch { /* 无痕模式 */ }
+    };
+    head.addEventListener('pointermove', move);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+    e.preventDefault();
+  });
+}
+
+// 下拉选项（40 个格子 + 两副卡）只建一次，别每次渲染都重刷
+function buildDebugOptions() {
+  const cell = $('#dbg-cell');
+  if (cell && !cell.options.length) {
+    cell.innerHTML = store.board
+      .map((c, i) => `<option value="${i}">${i} · ${esc(c.name)}</option>`)
+      .join('');
+  }
+  const fill = (sel, deck) => {
+    const el = $(sel);
+    if (!el || el.options.length) return;
+    el.innerHTML = (deck || []).map((c, i) => `<option value="${i}">${esc(c.title)}</option>`).join('');
+  };
+  fill('#dbg-chance', store.decks?.chance);
+  fill('#dbg-chest', store.decks?.chest);
+}
+
+function renderDebugPanel() {
+  const panel = $('#debug-panel');
+  if (!panel) return;
+  const on = !!store.state?.debug;
+  const wasHidden = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !on);
+  if (!on) return;
+  if (wasHidden) {
+    let folded = false;
+    try { folded = localStorage.getItem(DP_FOLD_KEY) === '1'; } catch { /* 无痕模式 */ }
+    setDebugFold(folded);
+    initPanelPos(); // 刚显示出来才量得到尺寸，位置在这一刻定
+  }
+  buildDebugOptions();
+}
+
 function bindUI() {
   $('#btn-create').addEventListener('click', createRoom);
   $('#btn-solo').addEventListener('click', soloGame);
+  $('#btn-test').addEventListener('click', testModeGame);
   $('#btn-join').addEventListener('click', joinRoom);
   $('#btn-random-name').addEventListener('click', randomName);
   $('#chat-form').addEventListener('submit', sendChat);
@@ -156,6 +305,8 @@ function bindUI() {
   });
   [$('#btn-copy'), $('#btn-copy2'), $('#btn-copy3')].forEach((b) => b?.addEventListener('click', copyInvite));
   $('#btn-exit').addEventListener('click', exitRoom);
+  $('#debug-panel').addEventListener('click', onDebugClick);
+  initDebugPanelDrag();
 
   $('#actions').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-action]');
@@ -183,6 +334,10 @@ function bindUI() {
     store.boardSize.bw = 1;
     if (store.state && store.state.phase !== 'lobby') paintTokens();
     layoutStack(); // 播报高度跟着棋盘变了，重新排一次
+    const dp = $('#debug-panel');
+    if (dp && !dp.classList.contains('hidden') && dp.dataset.pos) {
+      applyPanelPos(dp.offsetLeft, dp.offsetTop); // 面板别被挤到屏幕外
+    }
   });
 
   $('#btn-theme').addEventListener('click', () => {
@@ -260,9 +415,11 @@ function applyTheme(theme) {
   const icon = $('#theme-icon');
   const label = $('#theme-label');
   const btn = $('#btn-theme');
+  // 图标和文字都表示"现在处在哪套主题"：太阳配浅色、月亮配深色。
+  // 点一下要切到哪套，改由悬浮提示说明（按钮是切换用的，不能把它读成目标态）
   if (icon) icon.textContent = light ? '☀' : '☾';
-  if (label) label.textContent = light ? '深色' : '浅色';
-  if (btn) btn.title = light ? '切换到深色主题' : '切换到浅色主题';
+  if (label) label.textContent = light ? '浅色' : '深色';
+  if (btn) btn.title = light ? '当前浅色主题，点一下切换到深色' : '当前深色主题，点一下切换到浅色';
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', light ? '#eef3f9' : '#060b14');
 }
@@ -287,6 +444,20 @@ async function soloGame() {
     for (let i = 0; i < 3; i++) {
       await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'addBot' } });
     }
+    await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'start' } });
+    enterRoom(r);
+  } catch (e) { toast(e.message); }
+}
+
+// 测试模式：一个人直接开局、不带机器人，进去就能手动摆位和指定抽卡
+async function testModeGame() {
+  const name = $('#name-input').value.trim();
+  if (!name) return toast('先给自己起个名字');
+  localStorage.setItem('lofoten:name', name);
+  try {
+    const r = await api('/api/create', { name });
+    // 开关要赶在 start 之前：单人开局只对测试房间放行
+    await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'setDebug', on: true } });
     await api('/api/action', { roomId: r.roomId, token: r.token, action: { type: 'start' } });
     enterRoom(r);
   } catch (e) { toast(e.message); }
@@ -512,6 +683,8 @@ function renderGame() {
   // 开新一局（回合数归零）时棋子直接就位，不要倒着走一圈
   if (store.lastTurnNo != null && S.turnNo < store.lastTurnNo) snapTokens();
   store.lastTurnNo = S.turnNo;
+  // 先把新轨迹排进队列：后面渲染播报时才知道"棋子还要走"，不会抢在走子之前把话说出来
+  adoptPaths(S);
   $('#room-code').textContent = S.id;
   renderPlayers();
   renderCashFx(S);
@@ -522,6 +695,7 @@ function renderGame() {
   renderLog();
   renderTokens();
   renderChat();
+  renderDebugPanel();
   const bh = $('#bank-houses');
   const bhh = $('#bank-hotels');
   if (bh && bh.textContent !== String(S.bank.houses)) bh.textContent = S.bank.houses;
@@ -844,9 +1018,15 @@ let stepTick = 0;
 // 让"播报说要动 → 棋子动"这条因果链被看见，而不仅仅是等了一段时间。
 const MOVE_RESUME_MS = 520;
 const MOVE_HOLD_MAX_MS = 1600;
+const JUMP_GLIDE_MS = 620;    // 被押送进监狱时直线飞过去的时间
+const JUMP_SETTLE_MS = 780;   // 飞行 + 落地动作演完再继续，别让下一段抢戏
+
+const cw = (a, b) => (b - a + 40) % 40;  // 顺时针 a→b 的格数
+const ccw = (a, b) => (a - b + 40) % 40; // 逆时针 a→b 的格数
 
 // 「还要不要走」不能只看 viewPos 是否等于最终 pos：起点 → 卡格 → 抽到回起点这类往返，
 // 首尾是同一格但中间整段过程都要演出来，所以队列里还剩分段就算没走完。
+// 存着却还没接上的轨迹也算：它是"棋子待会儿还要动"的证据，播报得等它。
 function pendingMove() {
   const S = store.state;
   return S.players.some((p) => {
@@ -854,27 +1034,62 @@ function pendingMove() {
     const q = store.moveQ.get(p.id);
     if (q && q.length) return true; // 还有分段没走完（首尾可能同格）
     const cur = store.viewPos.get(p.id);
-    return cur !== undefined && cur !== p.pos;
+    if (cur === undefined) return false;
+    if (store.pathStash.get(p.id) && cur !== p.pos) return true;
+    return cur !== p.pos;
   });
 }
 
-// 服务端给了这一趟的位移轨迹就照着走：先走到卡格，再后退 / 再前往某地 / 顺时针进监狱。
-// 没有轨迹（老版本、重连）才退化成"就近走"。
+// 这一段还能不能接着走：棋子得站在 from→to 这条弧上（含两端）。
+// 已经越过的段直接丢掉——客户端落后一两格时（比如上一次还差一步没走完），
+// 从中间接上继续走就行，不必非要从头对齐。
+function firstLiveSeg(path, cur) {
+  for (let i = 0; i < path.length; i++) {
+    const s = path[i];
+    if (s.from === s.to) continue;
+    if (s.mode === 'jump') { if (cur === s.from) return i; continue; }
+    if (s.mode === 'back') {
+      if (ccw(s.from, cur) + ccw(cur, s.to) === ccw(s.from, s.to)) return i;
+      continue;
+    }
+    if (cw(s.from, cur) + cw(cur, s.to) === cw(s.from, s.to)) return i;
+  }
+  return -1;
+}
+
+// 服务端给了这一趟的位移轨迹就照着走：先走到卡格，再后退 / 再前往某地 / 再被押送。
+// 接不上的先存起来，等上一段走完再接，绝不因为"位置差一格"就把整条轨迹扔掉。
 function adoptPaths(S) {
   if (store.moveSeq === S.moveSeq) return;
   store.moveSeq = S.moveSeq;
   S.players.forEach((p) => {
-    const path = p.path || [];
-    if (!path.length) return;
-    const q = store.moveQ.get(p.id);
-    if (q && q.length) return;                // 上一段还没走完，别打断
+    const path = (p.path || []).filter((s) => s.from !== s.to);
+    if (!path.length) { store.pathStash.delete(p.id); return; }
     const cur = store.viewPos.get(p.id);
     if (cur === undefined) return;
-    if (cur !== path[0].from) return;         // 对不上（掉线重连等）就按老办法走
-    // 这里不能用「cur === p.pos」跳过：往返一圈又回到出发格时首尾相同，
-    // 中间的来回路程仍然要一格格走出来
-    if (!path.some((s) => s.from !== s.to)) return;
-    store.moveQ.set(p.id, path.slice());
+    const i = firstLiveSeg(path, cur);
+    if (i < 0) { store.pathStash.delete(p.id); return; }
+    const q = store.moveQ.get(p.id);
+    if (q && q.length) store.pathStash.set(p.id, path.slice(i)); // 还在走上一段，先存着
+    else { store.moveQ.set(p.id, path.slice(i)); store.pathStash.delete(p.id); }
+  });
+}
+
+// 上一段走完（或棋子落到弧上了）就把存着的轨迹接上
+function drainPathStash() {
+  const S = store.state;
+  if (!S) return;
+  S.players.forEach((p) => {
+    const stash = store.pathStash.get(p.id);
+    if (!stash) return;
+    const q = store.moveQ.get(p.id);
+    if (q && q.length) return; // 还在走，等它走完再说
+    const cur = store.viewPos.get(p.id);
+    if (cur === undefined) return;
+    const i = firstLiveSeg(stash, cur);
+    if (i < 0) { store.pathStash.delete(p.id); return; }
+    store.moveQ.set(p.id, stash.slice(i));
+    store.pathStash.delete(p.id);
   });
 }
 
@@ -882,8 +1097,11 @@ function stepTokens() {
   store.moveTimer = null;
   const S = store.state;
   if (!S) return;
+  drainPathStash(); // 上一段刚走完，看看存着的轨迹能不能接上
   let moved = false;
+  let jumped = false;
   let stepMs = TOKEN_STEP_MS;
+  let glideMs = 0; // 有人正在被押送：这一拍要等他飞到，别被别人的快节奏带过去
   S.players.forEach((p) => {
     const cur = store.viewPos.get(p.id);
     if (cur === undefined) return;
@@ -897,6 +1115,18 @@ function stepTokens() {
     // 没有分段可走、且已经站在最终格上，才算走完
     if (!seg && cur === p.pos) return;
 
+    // 入狱是"直接押送"：不逐格绕棋盘（官方 "Do not pass GO"），
+    // 但也不是凭空闪现——棋子沿直线飞过去，看得见它是一路被押到监狱的
+    if (seg && seg.mode === 'jump') {
+      q.shift();
+      glideToJail(p.id, seg.to);
+      moved = true;
+      jumped = true;
+      glideMs = Math.max(glideMs, JUMP_SETTLE_MS);
+      if (q.length) holdMove(p.id);
+      return;
+    }
+
     let dir;
     if (seg) dir = seg.mode === 'back' ? -1 : 1;
     else {
@@ -907,10 +1137,11 @@ function stepTokens() {
     }
     store.viewPos.set(p.id, (cur + dir + 40) % 40);
     moved = true;
-    // 「前往某块地」「回到起点」可能要走二三十格，段内剩余多就走快些，别让人干等
+    // 「前往某块地」「回到起点」按官方规则要顺时针绕，可能要走三十几格，
+    // 段内剩得越多走得越快，别让人干等（>26 格那档就是给绕大半圈用的）
     if (seg) {
       const left = dir < 0 ? (cur - seg.to + 40) % 40 : (seg.to - cur + 40) % 40;
-      stepMs = Math.min(stepMs, left > 18 ? 54 : left > 9 ? 72 : TOKEN_STEP_MS);
+      stepMs = Math.min(stepMs, left > 26 ? 42 : left > 18 ? 54 : left > 9 ? 72 : TOKEN_STEP_MS);
     }
     // 这一段走完了：后面还有一段就先停住，把播报放出来，等播报出来了再接着走
     if (seg && store.viewPos.get(p.id) === seg.to) {
@@ -921,17 +1152,63 @@ function stepTokens() {
   if (moved) {
     paintTokens();
     stepTick = (stepTick + 1) % 8;
-    // 走得太密时脚步声隔一下再响，免得连成一串噪音
-    if (stepMs >= TOKEN_STEP_MS || stepTick % 2 === 0) sfx('step', { k: stepTick });
+    // 走得太密时脚步声隔一下再响，免得连成一串噪音（押送进监狱那一步没有脚步声）
+    if (!jumped && (stepMs >= TOKEN_STEP_MS || stepTick % 2 === 0)) sfx('step', { k: stepTick });
     // 停在段间等播报时不要再排下一步，由 resumeMove() 接着放
-    if (!store.moveHold) store.moveTimer = setTimeout(stepTokens, stepMs);
+    if (!store.moveHold) store.moveTimer = setTimeout(stepTokens, Math.max(stepMs, glideMs));
   } else {
     // 走完了，留一点过渡时间再放播报，避免"人还没站稳就开始播下一条"
+    store.pathStash.clear(); // 人都到位了，没接上的轨迹就作废，别把播报一直压住
     store.moveSettleAt = Date.now() + 220;
     renderActions(); // 走子期间禁用的按钮，落地后恢复
     clearTimeout(store.bannerWaitTimer);
     store.bannerWaitTimer = setTimeout(pumpBanner, 260);
   }
+}
+
+// 直接押送进监狱：棋子不逐格绕棋盘（官方 "Do not pass GO"），
+// 而是从当前位置沿直线飞到监狱格——既不会路过起点，动作也看得见，不是凭空闪现。
+function glideToJail(pid, to) {
+  const tok = store.tokenEls.get(pid);
+  store.viewPos.set(pid, to);
+  // 直线位移用更长、更"抬着走"的过渡（.gliding），飞完摘掉，别影响后面的逐格走
+  if (tok) {
+    tok.classList.add('gliding');
+    const prev = store.glideTimers.get(pid);
+    if (prev) clearTimeout(prev);
+  }
+  paintTokens();
+  sfx('escort'); // 起飞的一声"呼"，落地那记闷响等飞到再响
+
+  const land = () => {
+    // 同一个棋子 / 同一格连续触发时要先掐掉上一次的收尾，不然 class 会残留
+    if (tok) {
+      tok.classList.remove('gliding');
+      store.glideTimers.delete(pid);
+    }
+    const fx = (key, el, ms) => {
+      if (!el) return;
+      const prev = store.jailFxTimers.get(key);
+      if (prev) clearTimeout(prev);
+      el.classList.remove('jailed');
+      void el.offsetWidth; // 重启一次动画
+      el.classList.add('jailed');
+      store.jailFxTimers.set(key, setTimeout(() => {
+        el.classList.remove('jailed');
+        store.jailFxTimers.delete(key);
+      }, ms));
+    };
+    fx('tok:' + pid, tok, 560);
+    fx('cell:' + to, store.cellEls[to]?.el, 760);
+    sfx('jailDrop'); // 落地闷响，和播报那条低沉的"铁门"声错开
+  };
+
+  const prevLand = store.jailLandTimers.get(pid);
+  if (prevLand) clearTimeout(prevLand);
+  store.jailLandTimers.set(pid, setTimeout(() => {
+    store.jailLandTimers.delete(pid);
+    land();
+  }, JUMP_GLIDE_MS));
 }
 
 // 走完一段先按住棋子：点亮它和目标格，再把压住的播报放出来
@@ -963,13 +1240,20 @@ function primeMove(pid) {
   if (cell) {
     cell.classList.add('target');
     cell.classList.toggle('target-back', seg.mode === 'back');
+    cell.classList.toggle('target-jail', seg.mode === 'jump');
   }
   sfx('prime');
 
   // 播报里带一行去向，把"接下来会发生什么"直接写出来
   const from = store.viewPos.get(pid) ?? 0;
-  const n = seg.mode === 'back' ? (from - seg.to + 40) % 40 : (seg.to - from + 40) % 40;
   const name = store.board[seg.to]?.name || '';
+  if (seg.mode === 'jump') {
+    // 押送不经过任何格子，所以不写格数，只写"直接押送"
+    store.moveHint =
+      `<div class="tb-move-hint jail"><span class="mh-arrow">⤓</span>直接押送 → ${esc(name)}</div>`;
+    return;
+  }
+  const n = seg.mode === 'back' ? (from - seg.to + 40) % 40 : (seg.to - from + 40) % 40;
   const verb = seg.mode === 'back' ? '后退' : '前往';
   store.moveHint =
     `<div class="tb-move-hint${seg.mode === 'back' ? ' back' : ''}">`
@@ -984,7 +1268,7 @@ function clearPrime() {
     const tok = store.tokenEls.get(pid);
     if (tok) tok.classList.remove('primed');
   }
-  $$('.cell.target').forEach((c) => c.classList.remove('target', 'target-back'));
+  $$('.cell.target').forEach((c) => c.classList.remove('target', 'target-back', 'target-jail'));
   store.moveHoldPid = null;
   store.moveHint = null;
 }
@@ -1020,6 +1304,11 @@ function snapTokens() {
   clearPrime();
   store.moveSettleAt = 0;
   store.moveQ.clear();
+  store.pathStash.clear();
+  store.glideTimers.forEach((t) => clearTimeout(t));
+  store.glideTimers.clear();
+  store.jailLandTimers.forEach((t) => clearTimeout(t));
+  store.jailLandTimers.clear();
   S.players.forEach((p) => store.viewPos.set(p.id, p.pos));
   paintTokens();
 }
@@ -1405,6 +1694,7 @@ function resetBannerCursor() {
   store.lastLogSeq = null;
   store.lastTurnKey = '';
   store.moveQ.clear();
+  store.pathStash.clear();
   store.moveSeq = -1;
   clearTimeout(store.moveHoldTimer);
   clearTimeout(store.moveResumeTimer);
@@ -1561,7 +1851,27 @@ function renderActions() {
   }
   if (moving) {
     $$('button[data-action]', box).forEach((b) => { b.disabled = true; });
+    // 这一版画面正好停在"棋子还在动"的瞬间，播报也放完了，就再也没有人来重画按钮，
+    // 结果结束回合一直灰着（进监狱那 20 格就是这么卡的）。留一个兜底重画，落地即解锁。
+    markActionsStale();
+  } else {
+    clearActionsStale();
   }
+}
+
+// 走子 / 停顿期间禁用按钮后，隔一会儿再重画一次：安静下来就把按钮放出来。
+// 只在"还在动"的时候续期，画面稳定后自然停下，不会一直空转。
+function markActionsStale() {
+  if (store.actionsStaleTimer) return;
+  store.actionsStaleTimer = setTimeout(() => {
+    store.actionsStaleTimer = null;
+    renderActions();
+  }, 240);
+}
+
+function clearActionsStale() {
+  clearTimeout(store.actionsStaleTimer);
+  store.actionsStaleTimer = null;
 }
 
 function tradeOfferCard(t, canAnswer) {

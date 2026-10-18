@@ -42,9 +42,22 @@
         <p class="ap-note">按 M 键快速静音</p>
       </div>
     </div>
-    <button id="btn-theme" class="theme-btn" title="切换到浅色主题">
-      <span id="theme-icon">☾</span><span id="theme-label">浅色</span>
+    <button id="btn-theme" class="theme-btn" title="当前深色主题，点一下切换到浅色">
+      <span id="theme-icon">☾</span><span id="theme-label">深色</span>
     </button>
+    <script>
+      // 首帧就把按钮写成当前主题（太阳配浅色、月亮配深色），
+      // 否则存了浅色偏好时，第一帧会顶着"月亮 + 深色"再被 JS 改成太阳
+      (function () {
+        var light = document.documentElement.dataset.theme === 'light';
+        var ic = document.getElementById('theme-icon');
+        var lb = document.getElementById('theme-label');
+        var b = document.getElementById('btn-theme');
+        if (ic) ic.textContent = light ? '☀' : '☾';
+        if (lb) lb.textContent = light ? '浅色' : '深色';
+        if (b) b.title = light ? '当前浅色主题，点一下切换到深色' : '当前深色主题，点一下切换到浅色';
+      })();
+    </script>
     <button id="btn-copy" class="btn ghost tiny hidden">邀请链接</button>
     <button id="btn-exit" class="btn ghost tiny hidden">退出</button>
   </div>
@@ -73,7 +86,8 @@
         </label>
         <button id="btn-create" class="btn primary block">创建房间</button>
         <button id="btn-solo" class="btn ghost block">单人对战 3 个机器人</button>
-        <p class="hint">创房后会得到 4 位房间码；想一个人玩，直接点上面的机器人开局。</p>
+        <button id="btn-test" class="btn ghost block test-entry">🧪 测试模式 · 单人直接开局</button>
+        <p class="hint">创房后会得到 4 位房间码；想一个人玩，直接点上面的机器人开局；要复现难碰上的走子 / 抽卡，点测试模式。</p>
       </div>
 
       <div class="panel lobby-card">
@@ -216,6 +230,44 @@
 
 <div id="toast" class="toast"></div>
 <div id="modal-root"></div>
+
+<!-- 测试模式面板：房主开关，用来复现难碰上的走子 / 卡牌情形 -->
+<section id="debug-panel" class="debug-panel hidden">
+  <header class="dp-head" id="dp-head" title="按住这里可以拖动面板">
+    <span class="dp-grip" aria-hidden="true">⠿</span>
+    <span class="dp-title">🧪 测试模式</span>
+    <button class="dp-close" data-dbg="collapse" id="dp-collapse" title="收起面板" aria-label="收起面板">▾</button>
+  </header>
+  <div class="dp-body" id="dp-body">
+  <div class="dp-row">
+    <span class="dp-label">走子</span>
+    <input id="dbg-steps" class="dp-num" type="number" value="7" min="-39" max="39" step="1" />
+    <button class="dp-btn" data-dbg="move">前进</button>
+    <button class="dp-btn ghost" data-dbg="moveBack">后退</button>
+  </div>
+  <div class="dp-row">
+    <span class="dp-label">跳到</span>
+    <select id="dbg-cell" class="dp-sel"></select>
+    <button class="dp-btn" data-dbg="goto">前往</button>
+  </div>
+  <div class="dp-row">
+    <span class="dp-label">极光卡</span>
+    <select id="dbg-chance" class="dp-sel"></select>
+    <button class="dp-btn" data-dbg="chance">抽</button>
+  </div>
+  <div class="dp-row">
+    <span class="dp-label">命运卡</span>
+    <select id="dbg-chest" class="dp-sel"></select>
+    <button class="dp-btn" data-dbg="chest">抽</button>
+  </div>
+  <div class="dp-row">
+    <span class="dp-label">机器人</span>
+    <button class="dp-btn" data-dbg="addBot">＋ 加入</button>
+    <button class="dp-btn ghost" data-dbg="removeBot">－ 移除</button>
+  </div>
+  <p class="dp-note">抽卡会先顺时针走到最近的对应卡格再触发（和真实游戏一样），走子 / 抽卡只在自己的回合生效，用完本回合就不能再掷骰，点「结束回合」继续。机器人可以在对局中随时加减。</p>
+  </div>
+</section>
 
 <script type="module" src="/app.js"></script>
 </body>

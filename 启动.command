@@ -1,6 +1,8 @@
 #!/bin/bash
 # 罗弗敦大富翁 —— 双击启动本地服务
 # 会先停掉占用 5200 端口的旧进程，再重新启动，然后自动打开浏览器
+# 注意：本脚本与 node 服务同属一个进程组，关闭终端窗口（任何方式）
+# 都会通过 trap 把服务一起停掉。
 
 DIR="/Users/daqincha/Library/Mobile Documents/com~apple~CloudDocs/Coding/mini-games/lofoten-monopoly"
 PORT=5200
@@ -26,7 +28,21 @@ if [ -n "$PID" ]; then
   sleep 1
 fi
 
-nohup "$NODE" server.js > "$LOG" 2>&1 &
+# 启动 node（不使用 nohup，使其留在当前进程组，随终端一起结束）
+"$NODE" server.js > "$LOG" 2>&1 &
+NODE_PID=$!
+
+# 任何导致脚本退出的方式（回车退出 / 关闭窗口收到 SIGHUP / Ctrl-C）
+# 都把 node 服务一起停掉
+cleanup() {
+  if kill -0 "$NODE_PID" 2>/dev/null; then
+    echo ""
+    echo "正在停止服务（PID $NODE_PID）…"
+    kill "$NODE_PID" 2>/dev/null
+  fi
+}
+trap cleanup EXIT INT HUP TERM
+
 echo "启动中…"
 sleep 2
 
@@ -43,8 +59,7 @@ echo "  本机:   http://localhost:$PORT"
 [ -n "$LAN" ] && echo "  局域网: http://$LAN:$PORT"
 echo "  日志:   $LOG"
 echo ""
-open "http://localhost:$PORT"
-
-echo "服务在后台运行，关掉这个窗口也不会停；要停止就在终端里执行：kill \$(lsof -ti tcp:$PORT)"
-echo "按回车关闭本窗口…"
+echo "服务随本终端运行，关闭窗口（或按回车）即停止服务。"
 read _
+
+# read 返回后脚本正常退出，EXIT trap 会停掉服务

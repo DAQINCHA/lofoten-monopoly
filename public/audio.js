@@ -382,6 +382,17 @@ const SFX = {
     noise({ t, dur: 0.3, gain: 0.1, type: 'bandpass', freq: 380, q: 3 });
     osc({ type: 'square', freq: 220, glide: 170, t: t + 0.1, dur: 0.3, gain: 0.05, lp: 700 });
   },
+  // 被押送进监狱：棋子沿直线飞过去时的一记风声，落地那声闷响由 jailDrop 负责
+  escort: (t) => {
+    noise({ t, dur: 0.42, gain: 0.09, type: 'bandpass', freq: 500, sweep: 1900, q: 1.1 });
+    osc({ type: 'triangle', freq: 520, glide: 240, t: t + 0.22, dur: 0.28, gain: 0.05, attack: 0.05 });
+  },
+  // 被押送进监狱时棋子"砰"一下落地的闷响（和播报那条低沉铁门声错开，不叠在一起）
+  jailDrop: (t) => {
+    osc({ type: 'sine', freq: 165, glide: 58, t, dur: 0.24, gain: 0.2 });
+    noise({ t, dur: 0.11, gain: 0.07, type: 'lowpass', freq: 700 });
+    woodblock(t + 0.02, 0.12, 520);
+  },
   free: (t) => {
     [65, 69, 72, 76].forEach((m, i) => marimba(t + i * 0.08, m, 0.45, 0.12));
   },

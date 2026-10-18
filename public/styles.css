@@ -167,6 +167,9 @@ body {
 .btn.ghost { background: transparent; box-shadow: none; }
 .btn.tiny { font-size: 11px; padding: 6px 10px; border-radius: 8px; }
 .btn.danger { border-color: rgba(239, 91, 76, 0.35); color: #ffb4ab; }
+/* 大厅里的测试模式入口：和其它按钮区分开一点 */
+.btn.ghost.test-entry { border-color: rgba(240, 192, 74, 0.34); color: var(--gold); }
+.btn.ghost.test-entry:hover { border-color: rgba(240, 192, 74, 0.6); }
 
 .icon-btn {
   appearance: none; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.03);
@@ -546,7 +549,10 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   display: flex; flex-direction: column; gap: 6px;
   flex: 1 1 auto; min-height: 60px;
   overflow-y: auto; overflow-x: hidden; padding-right: 2px;
-  /* 顶部淡入，滚动时消息不会硬切 */
+  /* 顶部淡入，滚动时消息不会硬切。
+     padding-top 要 ≥ 渐变高度：不滚动的第一条消息得完全落在不透明区里，
+     否则它的上沿会被这层渐变"啃"掉一截，看着像被阴影遮住 */
+  padding-top: 14px;
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px);
   mask-image: linear-gradient(180deg, transparent 0, #000 14px);
 }
@@ -670,6 +676,20 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 .cell.target-back::before {
   border-color: #6fe0bd;
   box-shadow: inset 0 0 20px -4px #6fe0bd, 0 0 22px -2px rgba(111, 224, 189, 0.6);
+}
+/* 入狱用红色，预告"直接押送"时和金色（前往）/ 青色（后退）区分开 */
+.cell.target-jail::before {
+  border-color: #ff8f8f;
+  box-shadow: inset 0 0 20px -4px #ff8f8f, 0 0 22px -2px rgba(255, 143, 143, 0.6);
+}
+/* 棋子落到监狱格那一瞬间，整格红闪一下 */
+.cell.jailed {
+  z-index: 4;
+  animation: cell-jailed 0.72s ease-out;
+}
+@keyframes cell-jailed {
+  0% { background: #6d2530; box-shadow: inset 0 0 26px -4px #ff8f8f, 0 0 26px -2px rgba(255, 143, 143, 0.75); }
+  100% { background: #16304d; box-shadow: none; }
 }
 @keyframes cell-target {
   0%, 100% { background: #16304d; }
@@ -889,6 +909,7 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   letter-spacing: 0.06em; color: var(--gold);
 }
 .bc-banner .tb-move-hint.back { color: #6fe0bd; }
+.bc-banner .tb-move-hint.jail { color: #ff9b9b; }
 .bc-banner .tb-move-hint .mh-arrow {
   font-size: 1.2em; line-height: 1;
   animation: mh-nudge 0.72s ease-in-out infinite;
@@ -904,7 +925,10 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 }
 
 /* 棋子 */
-.bc-tokens { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+/* 棋子层要盖在所有格子之上：格子是后插进 #board 的，DOM 顺序比这一层还靠后，
+   一旦某格把 z-index 抬到 4（例如落地红闪的 .cell.jailed）就会打平、靠 DOM 顺序
+   反压过来，棋子会被格子的动画盖住一瞬。所以这一层取 6，稳稳压过格子的最高值 4。 */
+.bc-tokens { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
 .token {
   position: absolute;
   width: clamp(12px, 2.35cqw, 26px); height: clamp(12px, 2.35cqw, 26px);
@@ -956,6 +980,33 @@ input.name-flash { animation: nameFlash 0.45s ease; }
       0 9px 16px -2px #000,
       0 0 26px 2px var(--c);
   }
+}
+/* 押送进监狱：不逐格绕棋盘，用更长更"抬着走"的过渡沿直线飞过去（看得见的一段位移） */
+.token.gliding {
+  z-index: 9;
+  transition:
+    left 0.62s cubic-bezier(.42, .02, .32, 1),
+    top 0.62s cubic-bezier(.42, .02, .32, 1);
+  animation: token-glide 0.62s ease-in-out;
+}
+@keyframes token-glide {
+  0% { transform: translate(-50%, -50%) scale(1); }
+  22% { transform: translate(-50%, -76%) scale(1.34); }
+  100% { transform: translate(-50%, -50%) scale(1); }
+}
+/* 落地动作：从监狱格上冒出来 + 一记轻微回弹，配合 jailDrop 的闷响 */
+.token.jailed {
+  z-index: 9;
+  animation: token-jailed 0.54s cubic-bezier(.2, .85, .3, 1);
+}
+/* 棋子是"飞"过来的，落点那一刻必须一直看得见：从略微放大开始往下蹲，
+   不再从 opacity:0 冒出来（那样会有一瞬间什么都看不见，像是掉进格子里了） */
+@keyframes token-jailed {
+  0% { transform: translate(-50%, -50%) scale(1.12); opacity: 1; }
+  38% { transform: translate(-50%, -34%) scale(.88); opacity: 1; }
+  60% { transform: translate(-50%, -50%) scale(1.14); }
+  78% { transform: translate(-50%, -50%) scale(.96); }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
 }
 .token.primed::after {
   content: ''; position: absolute; inset: -5px;
@@ -1322,6 +1373,95 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 }
 .theme-btn:hover { color: var(--green); border-color: rgba(76, 224, 179, 0.4); }
 .theme-btn span:first-child { font-size: 12px; line-height: 1; }
+/* 测试模式开着的时候，顶栏那颗 🧪 亮起来 */
+.theme-btn.on {
+  color: #ffd479; border-color: rgba(240, 192, 74, 0.55);
+  background: rgba(240, 192, 74, 0.12);
+}
+
+/* ══════════ 测试模式面板 ══════════ */
+.debug-panel {
+  position: fixed; left: 14px; bottom: 14px; z-index: 60;
+  width: min(330px, calc(100vw - 28px));
+  padding: 10px 12px 11px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(240, 192, 74, 0.32);
+  /* 跟着主题走：深色时是 94% 的 --panel-solid，浅色时自然变成白色面板 */
+  background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  box-shadow: 0 18px 40px -14px #000, inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(7px);
+  font-size: 12px; color: var(--text);
+}
+.debug-panel.hidden { display: none; }
+/* 收起：只留标题栏一条，宽度也跟着缩到刚好包住内容 */
+.debug-panel.folded { width: auto; padding-bottom: 9px; }
+.debug-panel.folded .dp-head { margin-bottom: 0; }
+.debug-panel.folded .dp-body { display: none; }
+.debug-panel.folded .dp-title { flex: 0 1 auto; }
+/* 拖动时别选中文字，也别因为急着跟随指针而显得卡顿 */
+.debug-panel.dragging { user-select: none; box-shadow: 0 22px 46px -12px #000, inset 0 0 0 1px rgba(240, 192, 74, 0.28); }
+.dp-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  margin-bottom: 8px; cursor: grab; user-select: none; touch-action: none;
+}
+.debug-panel.dragging .dp-head { cursor: grabbing; }
+.dp-grip { color: var(--gold); opacity: 0.55; font-size: 13px; line-height: 1; letter-spacing: -1px; }
+.dp-title { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--gold); flex: 1; }
+.dp-close {
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  width: 20px; height: 20px; border-radius: 6px; cursor: pointer; font-size: 11px; line-height: 1;
+}
+.dp-close:hover { color: var(--gold); border-color: rgba(240, 192, 74, 0.5); }
+.dp-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.dp-label { flex: 0 0 3.5em; color: var(--muted); font-size: 11px; }
+.dp-num {
+  width: 58px; height: 26px; padding: 0 6px; border-radius: 7px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04);
+  color: var(--text); font: inherit; font-size: 12px;
+}
+.dp-sel {
+  flex: 1; min-width: 0; height: 26px; padding: 0 6px; border-radius: 7px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04);
+  color: var(--text); font: inherit; font-size: 11px;
+}
+.dp-btn {
+  height: 26px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+  border: 1px solid rgba(76, 224, 179, 0.45); background: rgba(76, 224, 179, 0.14);
+  color: var(--green); font: inherit; font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.dp-btn:hover { background: rgba(76, 224, 179, 0.24); }
+.dp-btn.ghost { border-color: var(--line); background: rgba(255, 255, 255, 0.04); color: var(--muted); }
+.dp-btn.ghost:hover { color: var(--ice); border-color: rgba(124, 199, 255, 0.4); }
+.dp-note { margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+/* 浅色主题：面板底色跟着变白，输入框也得换成浅底，否则白底白字看不清 */
+html[data-theme="light"] .debug-panel {
+  border-color: rgba(164, 113, 26, 0.34);
+  box-shadow: 0 18px 40px -18px rgba(20, 45, 80, 0.32), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+html[data-theme="light"] .dp-num,
+html[data-theme="light"] .dp-sel {
+  background: #ffffff;
+  border-color: rgba(28, 58, 92, 0.2);
+  color: var(--text);
+}
+html[data-theme="light"] .dp-btn {
+  border-color: rgba(15, 155, 118, 0.5);
+  background: rgba(15, 155, 118, 0.14);
+  color: #0b7d5e;
+}
+html[data-theme="light"] .dp-btn:hover { background: rgba(15, 155, 118, 0.24); }
+html[data-theme="light"] .dp-btn.ghost {
+  border-color: rgba(28, 58, 92, 0.18);
+  background: rgba(28, 58, 92, 0.05);
+  color: #4b6076;
+}
+html[data-theme="light"] .dp-btn.ghost:hover { color: #1d6a9a; border-color: rgba(29, 106, 154, 0.4); }
+html[data-theme="light"] .dp-close { border-color: rgba(28, 58, 92, 0.2); }
+@media (max-width: 720px) {
+  .debug-panel { left: 8px; right: 8px; bottom: 8px; width: auto; }
+  /* 手机上默认是左右撑满的，收起时得放开右边，否则一条标题栏也会拉满屏宽 */
+  .debug-panel.folded { right: auto; }
+}
 
 /* 声音设置面板 */
 .audio-wrap { position: relative; }
@@ -1514,6 +1654,32 @@ html[data-theme="light"] .cell.mortgaged::after {
 }
 html[data-theme="light"] .cell-mark { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px var(--own); }
 html[data-theme="light"] .house, html[data-theme="light"] .hotel { box-shadow: none; }
+
+/* 二段位移的目标格：深色版会把格子刷成深蓝（#16304d→#23507d），浅色下太突兀。
+   改成底色只泛一层淡淡的对应色，边框换深一档的同色系，保证在白底上看得清 */
+html[data-theme="light"] .cell.target { animation-name: cell-target-light; }
+@keyframes cell-target-light {
+  0%, 100% { background: #fbfdff; }
+  50% { background: #fbeccc; }
+}
+html[data-theme="light"] .cell.target::before {
+  border-color: #c98a12;
+  box-shadow: inset 0 0 20px -6px rgba(201, 138, 18, 0.45), 0 0 14px -6px rgba(201, 138, 18, 0.55);
+}
+html[data-theme="light"] .cell.target-back::before {
+  border-color: #0c9673;
+  box-shadow: inset 0 0 20px -6px rgba(12, 150, 115, 0.4), 0 0 14px -6px rgba(12, 150, 115, 0.5);
+}
+html[data-theme="light"] .cell.target-jail::before {
+  border-color: #cf4433;
+  box-shadow: inset 0 0 20px -6px rgba(207, 68, 51, 0.4), 0 0 14px -6px rgba(207, 68, 51, 0.5);
+}
+/* 落监狱的红闪同理，浅色下闪淡红而不是暗红 */
+html[data-theme="light"] .cell.jailed { animation-name: cell-jailed-light; }
+@keyframes cell-jailed-light {
+  0% { background: #ffdfd9; box-shadow: inset 0 0 26px -6px rgba(207, 68, 51, 0.55), 0 0 20px -6px rgba(207, 68, 51, 0.5); }
+  100% { background: #fbfdff; box-shadow: none; }
+}
 
 /* 棋盘中央 */
 html[data-theme="light"] .board-center {
