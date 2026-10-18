@@ -51,12 +51,12 @@ export const BOARD = [
   // ── 左边：自下而上 ──
   prop('乌塔克莱夫', 'Utakleiv', 'C', 14000, [1000, 5000, 15000, 45000, 62500, 75000], 10000, '🌊'),
   {
-    type: 'util', name: '潮汐发电站', en: 'Tidevannskraft', icon: '⚡', price: UTIL_PRICE,
+    type: 'util', name: '莫斯肯漩涡潮汐站', en: 'Moskstraumen', icon: '⚡', price: UTIL_PRICE,
     desc: `租金 = 骰子点数 ×${UTIL_RENT_PER_PIP}（独占两处则 ×${UTIL_RENT_BOTH}）`,
   },
   prop('豪克兰', 'Haukland', 'C', 14000, [1000, 5000, 15000, 45000, 62500, 75000], 10000, '🏝'),
   prop('温斯塔', 'Unstad', 'C', 16000, [1200, 6000, 18000, 50000, 70000, 90000], 10000, '🏄'),
-  { type: 'ferry', name: '韦略渡口', en: 'Værøy', icon: '⛴', price: FERRY_PRICE, rent: FERRY_RENT },
+  { type: 'ferry', name: '谢尔克峡湾渡口', en: 'Kjerkfjord', icon: '⛴', price: FERRY_PRICE, rent: FERRY_RENT },
   prop('卡贝尔沃格', 'Kabelvåg', 'D', 18000, [1400, 7000, 20000, 55000, 75000, 95000], 10000, '⛪'),
   { type: 'chest', name: '命运卡', en: 'Skjebne', icon: '🎴' },
   prop('斯塔姆松', 'Stamsund', 'D', 18000, [1400, 7000, 20000, 55000, 75000, 95000], 10000, '🎣'),
@@ -74,7 +74,7 @@ export const BOARD = [
   prop('埃格姆', 'Eggum', 'F', 26000, [2200, 11000, 33000, 80000, 97500, 115000], 15000, '🗿'),
   prop('松德', 'Sund', 'F', 26000, [2200, 11000, 33000, 80000, 97500, 115000], 15000, '🏚'),
   {
-    type: 'util', name: '深海养殖场', en: 'Havbruk', icon: '🐟', price: UTIL_PRICE,
+    type: 'util', name: '维斯特峡湾渔场', en: 'Vestfjorden', icon: '🐟', price: UTIL_PRICE,
     desc: `租金 = 骰子点数 ×${UTIL_RENT_PER_PIP}（独占两处则 ×${UTIL_RENT_BOTH}）`,
   },
   prop('莱克内斯', 'Leknes', 'F', 28000, [2400, 12000, 36000, 85000, 102500, 120000], 15000, '✈️'),

@@ -168,8 +168,15 @@ body {
 .btn.tiny { font-size: 11px; padding: 6px 10px; border-radius: 8px; }
 .btn.danger { border-color: rgba(239, 91, 76, 0.35); color: #ffb4ab; }
 /* 大厅里的测试模式入口：和其它按钮区分开一点 */
-.btn.ghost.test-entry { border-color: rgba(240, 192, 74, 0.34); color: var(--gold); }
+.btn.ghost.test-entry { border-color: rgba(240, 192, 74, 0.34); color: var(--gold); position: relative; }
 .btn.ghost.test-entry:hover { border-color: rgba(240, 192, 74, 0.6); }
+/* 🧪 脱离行内流贴在左侧，这样「测试模式」四个字才能和上方按钮的文字严格居中对齐；
+   若把 emoji 留在文字里，居中算的是「emoji + 文字」整块，文字必然右偏 */
+.btn.test-entry .te-icon {
+  position: absolute; left: 16px; top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
 
 .icon-btn {
   appearance: none; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.03);
@@ -199,6 +206,9 @@ body {
   justify-content: center;
   padding: 24px;
   overflow-y: auto;
+  /* 内容比视口高时右侧会出现滚动条，会把居中的卡片整体带偏左；
+     两侧都预留同宽 gutter，卡片才算真正落在窗口正中 */
+  scrollbar-gutter: stable both-edges;
 }
 .lobby-hero { text-align: center; margin-bottom: 34px; }
 .hero-kicker {
@@ -207,10 +217,11 @@ body {
 }
 .lobby-hero h1 {
   margin: 0;
-  font-family: "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+  /* 标题走无衬线粗体，别用宋体/衬线；字体族沿用 body 的系统字体栈 */
+  font-family: inherit;
   font-size: clamp(38px, 6vw, 64px);
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
   line-height: 1.1;
   text-shadow: 0 2px 24px rgba(76, 224, 179, 0.14), 0 1px 0 rgba(0, 0, 0, 0.6);
 }
@@ -241,17 +252,29 @@ body {
 
 .lobby-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 300px));
-  gap: 16px; width: 100%; max-width: 640px;
+  /* max-width 必须等于两栏宽 + gap（300*2+16），
+     否则网格比内容宽 24px，多出来的空隙全堆在右边，卡片看着就偏左 */
+  justify-content: center;
+  gap: 16px; width: 100%; max-width: 616px;
 }
-.lobby-card { padding: 20px; transition: transform 0.25s ease, border-color 0.25s, box-shadow 0.25s; }
+/* 悬停只做描边/光晕，不做位移，卡片本身不浮动 */
+.lobby-card { padding: 20px; transition: border-color 0.25s, box-shadow 0.25s; }
 .lobby-card:hover {
-  transform: translateY(-3px);
   border-color: rgba(76, 224, 179, 0.22);
   box-shadow: inset 0 1px 0 rgba(230, 238, 247, 0.07), 0 28px 56px -30px #000, 0 0 40px -24px rgba(76, 224, 179, 0.4);
 }
-.lobby-card .panel-title { margin-bottom: 16px; }
+.lobby-card .panel-title { margin-bottom: 16px; font-weight: 800; }
+/* 两张卡的标题分别用品牌色：左「开始一局」绿、右「加入一局」金 */
+.lobby-grid .lobby-card:nth-child(1) .panel-title { color: var(--green); }
+.lobby-grid .lobby-card:nth-child(2) .panel-title { color: var(--gold); }
 /* 两个整宽按钮上下要有明确的间距，否则阴影会压在一起 */
 .lobby-card .btn.block + .btn.block { margin-top: 10px; }
+
+/* 左右两栏的输入行高度统一：名字框 + 骰子按钮 跟右边的房间码框齐平 */
+.lobby-card { --lobby-input-h: 48px; }
+.lobby-card .name-row input,
+.lobby-card .name-dice,
+.lobby-card .field input.code-input { height: var(--lobby-input-h); }
 
 .name-row { display: flex; align-items: stretch; gap: 8px; }
 .name-row input { flex: 1 1 auto; min-width: 0; }
@@ -430,7 +453,9 @@ input.name-flash { animation: nameFlash 0.45s ease; }
 .room-chip .icon-btn { margin-left: auto; }
 
 /* 玩家卡 */
-.players { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding-right: 2px; flex: 0 1 auto; min-height: 0; }
+/* 玩家卡按内容占位，绝不压缩：聊天框只能吃剩下的高度，
+   否则聊天气泡一多，chat-panel 的基准高度变大，反而把玩家卡挤成一条缝 */
+.players { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding-right: 2px; flex: 0 0 auto; min-height: 0; }
 .pcard {
   position: relative;
   display: flex; align-items: center; gap: 10px;
@@ -549,6 +574,9 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   display: flex; flex-direction: column; gap: 6px;
   flex: 1 1 auto; min-height: 60px;
   overflow-y: auto; overflow-x: hidden; padding-right: 2px;
+  /* 和「岛上报事」一致：用系统细滚动条（覆盖掉全局那套 6px 常显滑块），
+     这样两个面板的滑块粗细、自动隐藏行为完全一样 */
+  scrollbar-width: thin;
   /* 顶部淡入，滚动时消息不会硬切。
      padding-top 要 ≥ 渐变高度：不滚动的第一条消息得完全落在不透明区里，
      否则它的上沿会被这层渐变"啃"掉一截，看着像被阴影遮住 */
@@ -1060,6 +1088,10 @@ input.name-flash { animation: nameFlash 0.45s ease; }
   font-size: 11.5px; line-height: 1.5;
   padding-right: 4px;
   scrollbar-width: thin;
+  /* 顶部淡入用的遮罩会盖住滚动内容的顶端。
+     和 .chat-list 同理：padding-top 必须 ≥ 渐变高度，
+     否则不滚动时第一条播报的上半截会被这层渐变啃掉 */
+  padding-top: 14px;
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px);
   mask-image: linear-gradient(180deg, transparent 0, #000 14px);
 }
