@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { BOARD, GROUPS, CHANCE, CHEST, START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS, UTIL_RENT_PER_PIP, UTIL_RENT_BOTH } from './src/board.js';
+import { BOARD, GROUPS, CHANCE, CHEST, START_CASH, SALARY, JAIL_FINE, MAX_PLAYERS, UTIL_RENT_PER_PIP, UTIL_RENT_BOTH } from './lib/board.js';
 import {
   createRoom, getRoom, joinRoom, leaveRoom, markDisconnected,
   snapshot, act, nextBotStep, chooseBotAction,
-} from './src/game.js';
-import { pickName } from './src/names.js';
+} from './lib/game.js';
+import { pickName } from './lib/names.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
