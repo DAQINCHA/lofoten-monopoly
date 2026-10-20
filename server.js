@@ -360,29 +360,20 @@ function lanAddresses() {
   const nets = os.networkInterfaces();
   for (const [name, list] of Object.entries(nets)) {
     for (const net of list || []) {
-      if (net.family === 'IPv4' && !net.internal) out.push({ name, address: net.address });
+      if (net.family === 'IPv4' && !net.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(net.address)) out.push({ name, address: net.address });
     }
   }
   return out;
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  const lines = [
-    '',
-    '  ╭──────────────────────────────────────────────╮',
-    '  │   罗弗敦大富翁 · LOFOTEN MONOPOLY            │',
-    '  ╰──────────────────────────────────────────────╯',
-    '',
-    `  本机访问:   http://localhost:${PORT}`,
-  ];
-  for (const n of lanAddresses()) {
-    lines.push(`  局域网:     http://${n.address}:${PORT}   (${n.name})`);
-  }
-  lines.push('', '  同一 Wi-Fi / 交换机的设备打开局域网地址即可联机。', '');
+  const lines = ['', '  罗弗敦大富翁 · 局域网联机', '  ─────────────────────────────────────────', `  本机    http://127.0.0.1:${PORT}`];
+  for (const n of lanAddresses().slice(0, 2)) lines.push(`  局域网  http://${n.address}:${PORT}`);
+  lines.push('  对局    保存在内存，重启后清空');
+  lines.push('', '  关闭这个窗口即停止服务。', '');
   console.log(lines.join('\n'));
 });
 
 process.on('SIGINT', () => {
-  console.log('\n服务已停止');
   process.exit(0);
 });
