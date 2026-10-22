@@ -7,6 +7,9 @@ health='/api/status'
 node_probe='process.exit(process.versions.node.split(".")[0] >= 18 ? 0 : 1)'
 node_min='18'
 
+clear
+print -n "\e]0;罗弗敦群岛大富翁 · 本地服务\a"
+
 pause_exit() {
   print ''
   print -n '  按任意键关闭窗口…'
@@ -77,6 +80,7 @@ fi
     sleep 0.2
   done
 ) &
+
 
 "$node_bin" server.js
 exit_code=$?

@@ -367,7 +367,8 @@ function lanAddresses() {
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  const lines = ['', '  罗弗敦大富翁 · 局域网联机', '  ─────────────────────────────────────────', `  本机    http://127.0.0.1:${PORT}`];
+  const bar = '='.repeat(60);
+  const lines = [bar, '   罗弗敦群岛大富翁  LOFOTEN MONOPOLY', bar, '', `  Node:    ${process.execPath}`, '', `  本机    http://127.0.0.1:${PORT}`];
   for (const n of lanAddresses().slice(0, 2)) lines.push(`  局域网  http://${n.address}:${PORT}`);
   lines.push('  对局    保存在内存，重启后清空');
   lines.push('', '  关闭这个窗口即停止服务。', '');
