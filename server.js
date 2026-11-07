@@ -323,7 +323,9 @@ const server = http.createServer(async (req, res) => {
     broadcast(room);
 
     const keepAlive = setInterval(() => {
-      try { res.write(': ping\n\n'); } catch { /* ignore */ }
+      // 用带事件名的心跳而不是 `: ping` 注释：注释前端收不到，
+      // 浏览器没法判断「这条流还活着」，顶栏就会一直停在「已连接」。
+      try { res.write('event: ping\ndata: 1\n\n'); } catch { /* ignore */ }
     }, 20000);
 
     req.on('close', () => {

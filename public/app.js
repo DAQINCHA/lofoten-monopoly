@@ -45,6 +45,7 @@ const store = {
   bannerLastShowAt: 0,
   lastLogSeq: null,
   lastAck: null,
+  lastFrameAt: 0,        // 最近一次收到服务器数据的时刻，连接状态靠它续命
   moveSettleAt: 0,
   lastDice: '',
   endShown: false,
@@ -67,8 +68,12 @@ async function api(path, body) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body || {}),
   });
-  let json = {};
-  try { json = await res.json(); } catch { /* ignore */ }
+  // 不能把「200 但不是 JSON」当成成功：静态托管对未知路径常常回一个 HTML 页面，
+  // 那样接口就成了空对象，调用方会带着 undefined 的房间号一路走下去。
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* 不是 JSON */ }
+  if (!json || typeof json !== 'object') throw new Error(`服务器没有正常响应（HTTP ${res.status}）`);
   if (!res.ok) throw new Error(json.error || '网络异常');
   if (json.error) throw new Error(json.error);
   return json;
@@ -106,11 +111,21 @@ async function act(action) {
 
 // ────────────── 启动 ──────────────
 async function boot() {
-  const data = await (await fetch('/api/board')).json();
-  store.board = data.board;
-  store.groups = data.groups;
-  store.meta = data.meta;
-  store.decks = data.decks;
+  // 拉棋盘的同时顺手当一次「服务端在不在」的探测：
+  // 大厅里没有房间可连，但顶栏至少要说真话——是服务器正常，还是压根没有后端。
+  try {
+    const data = await (await fetch('/api/board')).json();
+    if (!data || !Array.isArray(data.board)) throw new Error('bad board');
+    store.board = data.board;
+    store.groups = data.groups;
+    store.meta = data.meta;
+    store.decks = data.decks;
+    setConn('ok', '服务器正常');
+  } catch {
+    setConn('bad', '未连接服务器');
+    toast('连不上服务器：这个部署没有后端，请在跑 node server.js 的机器上打开');
+    return;
+  }
   buildBoard();
   bindUI();
   initAudio(); // 音频要等第一次用户手势才能出声，这里只做绑定
@@ -540,21 +555,52 @@ function scheduleRender() {
 
 function connect() {
   if (store.es) store.es.close();
+  store.lastFrameAt = 0;
+  setConn('wait', '连接中');
   const es = new EventSource(`/api/stream?room=${store.room}&token=${store.token}`);
   store.es = es;
-  es.onopen = () => setConn(true);
+  // onopen 只能证明「对方回了 200 且声明是 text/event-stream」，不能证明它真的在给数据。
+  // 所以绿灯要等第一帧完整状态真正到达；之后的存活靠心跳续命。
   es.onmessage = (ev) => {
-    try { store.state = JSON.parse(ev.data); } catch { return; }
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    store.state = data;
+    store.lastFrameAt = Date.now();
+    setConn('ok', '已连接');
     scheduleRender();
   };
-  es.onerror = () => setConn(false);
+  // 服务端每 20 秒补一个 ping，收到就说明这条流还活着（注释形式的 `: ping` 前端看不到）
+  es.addEventListener('ping', () => { store.lastFrameAt = Date.now(); });
+  // CLOSED 表示浏览器已经放弃重试（比如房间在服务端没了，回的是 403/404），
+  // 这时候还写「连接中」也是骗人，直接说断开。
+  es.onerror = () => setConn('wait', es.readyState === EventSource.CLOSED ? '连接已断开' : '连接中');
 }
 
-function setConn(ok) {
+// 连接状态只有一条规矩：没有数据就不给绿灯。
+//   进房前 —— 顶栏写的是 boot() 的探测结果（服务器正常 / 未连接服务器）
+//   连接中 —— 请求已发出、还在等数据（握手、断线重连都算）
+//   已连接 —— 收到过完整状态，且还在心跳有效期内
+const CONN_STALE_MS = 45000; // 服务端 20 秒一次心跳，这里留出漏掉一两次的余量
+let connKey = null;
+let connKind = null;
+
+// kind: 'ok' 绿灯 / 'bad' 红灯 / null 藏着不说
+function setConn(kind, text) {
   const el = $('#conn');
-  el.className = 'conn ' + (ok ? 'on' : 'off');
-  el.innerHTML = `<i></i>${ok ? '已连接' : '重连中'}`;
+  if (!el) return;
+  const key = kind + '|' + text;
+  if (connKey === key) return;
+  connKey = key;
+  connKind = kind;
+  el.className = 'conn ' + (kind === 'ok' ? 'on' : 'off') + (kind ? '' : ' hidden');
+  el.innerHTML = `<i></i>${text || ''}`;
 }
+
+// 心跳体检：只在绿灯亮着的时候查，超时就把绿灯收回去，不许界面停在「已连接」上骗人
+setInterval(() => {
+  if (connKind !== 'ok' || !store.room) return;
+  if (Date.now() - store.lastFrameAt > CONN_STALE_MS) setConn('wait', '连接中');
+}, 5000);
 
 async function exitRoom() {
   try { await api('/api/leave', { roomId: store.room, token: store.token }); } catch { /* ignore */ }
