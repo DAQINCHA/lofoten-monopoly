@@ -88,3 +88,17 @@ npm start          # 或 node server.js
 - 实时同步：SSE（`/api/stream`）推送全量状态，操作走 `POST /api/action`
 - 前端：`public/` 下原生 ES Module + CSS，无构建步骤
 - 状态全在服务端内存中，刷新页面可用本地保存的身份令牌自动重连；服务重启则房间清空
+
+## 云端版（Cloudflare Workers）
+
+同一套游戏还有一个云端部署包，放在 `edge-services/lofoten-monopoly-worker/`，
+一个 Worker 同时提供网页和联机服务，接口与本版**完全一致**（前端也共用 `public/` 这一份）。
+
+源码只有这一处：`lib/` 和 `public/` 是**唯一真身**，云端包里的对应文件是构建时复制过去的。
+所以——
+
+> **改了 `lib/` 或 `public/`（棋盘、规则、机器人、页面），要去云端包目录跑一次 `npm run build:edge`，
+> 把生成的文件一起提交。**
+
+只改了 `server.js` 的端口/启动横幅、启动脚本之类的东西，则不用管云端包。
+完整清单（哪些要重建、哪些不用、哪些要手动两边同步）见该目录的 `README.md` 与 `AGENTS.md`。
